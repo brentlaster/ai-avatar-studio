@@ -1,0 +1,11 @@
+# AI Avatar Studio v2 - API-Based
+# Much simpler than v1 — no ML models to install locally
+
+# Web UI
+gradio>=4.0.0
+
+# API calls
+requests>=2.28.0
+
+# Audio/video processing (ffmpeg must be installed separately)
+ffmpeg-python>=0.2.0

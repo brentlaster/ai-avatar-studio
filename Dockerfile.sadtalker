@@ -1,0 +1,66 @@
+###############################################################################
+# SadTalker — self-contained Docker image for CPU inference
+# Python 3.8  +  pinned numpy/torch/torchvision versions that SadTalker
+# was developed against.  No CUDA required.
+# IMPORTANT: Build with --platform linux/amd64 on Apple Silicon Macs.
+###############################################################################
+FROM --platform=linux/amd64 python:3.8-slim-bullseye
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies (including cmake/build tools for dlib)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git wget ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    build-essential cmake libopenblas-dev liblapack-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ---- Python dependencies (pinned to SadTalker-tested versions) ----
+# Use CPU-only PyTorch from the dedicated CPU index
+RUN pip install --no-cache-dir \
+    torch==1.12.1+cpu \
+    torchvision==0.13.1+cpu \
+    torchaudio==0.12.1 \
+    -f https://download.pytorch.org/whl/cpu/torch_stable.html
+
+# Install dlib separately with LTO disabled (LTO fails under x86 emulation
+# on Apple Silicon). The -fno-lto flags prevent the linker error.
+RUN CFLAGS="-fno-lto" CXXFLAGS="-fno-lto" LDFLAGS="-fno-lto" \
+    pip install --no-cache-dir dlib
+
+# Install remaining Python dependencies
+RUN pip install --no-cache-dir \
+    numpy==1.23.4 \
+    scipy==1.9.3 \
+    opencv-python-headless==4.7.0.72 \
+    scikit-image==0.19.3 \
+    Pillow==9.5.0 \
+    imageio==2.22.4 \
+    imageio-ffmpeg==0.4.7 \
+    librosa==0.9.2 \
+    pydub==0.25.1 \
+    safetensors \
+    tqdm \
+    yacs \
+    pyyaml \
+    joblib \
+    face_alignment \
+    kornia==0.6.8 \
+    gfpgan==1.3.8 \
+    basicsr==1.4.2 \
+    facexlib==0.3.0 \
+    realesrgan==0.3.0
+
+# ---- Clone SadTalker ----
+RUN git clone --depth 1 https://github.com/OpenTalker/SadTalker.git /app/SadTalker
+
+# ---- Download model checkpoints ----
+RUN cd /app/SadTalker && bash scripts/download_models.sh
+
+# ---- Entrypoint script ----
+COPY sadtalker_entrypoint.py /app/sadtalker_entrypoint.py
+
+ENTRYPOINT ["python", "/app/sadtalker_entrypoint.py"]
