@@ -1,6 +1,7 @@
 """
 AI Avatar Studio v2 - Configuration
 Add your API keys here or set them as environment variables.
+Keys can also be set at runtime via the Gradio UI.
 """
 
 import os
@@ -18,6 +19,15 @@ ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "your-elevenlabs-api-k
 # Free trial: ~20 seconds of video
 # ---------------------------------------------------------------------------
 DID_API_KEY = os.environ.get("DID_API_KEY", "your-d-id-api-key-here")
+
+
+def set_api_key(name: str, value: str):
+    """Update an API key at runtime (called from the Gradio UI)."""
+    import config
+    if name == "ELEVENLABS_API_KEY":
+        config.ELEVENLABS_API_KEY = value
+    elif name == "DID_API_KEY":
+        config.DID_API_KEY = value
 
 # ---------------------------------------------------------------------------
 # General settings
