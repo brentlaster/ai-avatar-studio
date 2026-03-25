@@ -207,6 +207,16 @@ Both Avatar Mode and Presentation Mode have a **"Use Last Files"** button at the
 
 ---
 
+## Performance Optimizations
+
+**Batch TTS for Presentations (Coqui XTTS):** When generating a presentation with multiple slides, the app uses batch mode — the XTTS v2 model loads once and generates audio for all slides sequentially in a single process. This saves ~15-20 seconds of model loading time per slide compared to the previous approach of spawning a separate process for each slide.
+
+**Parallel Video Assembly:** After audio is generated, the per-slide video segments (image + audio mux via ffmpeg) are created in parallel using up to 4 worker threads. Since these are independent CPU-bound ffmpeg processes, this can cut assembly time by 2-4x on multi-core machines.
+
+These optimizations apply automatically — no configuration needed.
+
+---
+
 ## Setup Details
 
 ### Prerequisites

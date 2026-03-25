@@ -28,6 +28,7 @@ from typing import Optional
 
 from pipeline import (
     generate_speech,
+    _generate_speech_coqui_batch,
     AvatarConfig,
     TEMP_DIR,
     OUTPUT_DIR,
@@ -691,51 +692,99 @@ def generate_presentation(
     total_chars = sum(len(seg.text) for seg in segments)
     print(f"      Total script: {total_chars:,} characters")
 
-    for i, seg in enumerate(segments):
-        print(f"\n      Slide {seg.slide_number} ({i + 1}/{len(segments)}, {len(seg.text):,} chars) ...")
-        # Show the cleaned narration text for debugging (first 200 chars)
-        preview_text = seg.text[:200].replace('\n', ' ↵ ')
-        print(f"      Narration: \"{preview_text}{'...' if len(seg.text) > 200 else ''}\"")
-        # Coqui XTTS outputs .wav; ElevenLabs outputs .mp3
-        audio_ext = ".wav" if config.tts_engine == "coqui_xtts" else ".mp3"
-        audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}{audio_ext}")
-        generate_speech(
-            script_text=seg.text,
-            voice_id=voice_id,
-            config=config,
-            output_path=audio_path,
-        )
-        # generate_speech may change the extension (Coqui forces .wav)
-        # so check what file actually exists
-        wav_alt = os.path.splitext(audio_path)[0] + ".wav"
-        mp3_alt = os.path.splitext(audio_path)[0] + ".mp3"
-        if os.path.exists(audio_path):
-            seg.audio_path = audio_path
-        elif os.path.exists(wav_alt):
-            seg.audio_path = wav_alt
-        elif os.path.exists(mp3_alt):
-            seg.audio_path = mp3_alt
-        else:
-            raise RuntimeError(f"Audio file not found for slide {seg.slide_number}: tried {audio_path}")
+    if config.tts_engine == "coqui_xtts" and len(segments) > 1:
+        # --- BATCH MODE: load Coqui model once for all slides ---
+        print(f"      Using batch mode (model loads once for all {len(segments)} slides)")
+        batch_items = []
+        for seg in segments:
+            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}.wav")
+            batch_items.append({
+                "text": seg.text,
+                "output_path": audio_path,
+                "label": f"Slide {seg.slide_number}",
+            })
 
         if progress_callback:
-            pct = 0.2 + 0.5 * ((i + 1) / len(segments))
-            progress_callback(pct, desc=f"Generated audio for slide {seg.slide_number}")
+            progress_callback(0.25, desc="Generating all slide audio (batch mode)...")
 
-    # Step 4: Create video segments and concatenate
+        _generate_speech_coqui_batch(batch_items, config)
+
+        # Map outputs back to segments
+        for seg in segments:
+            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}.wav")
+            if os.path.exists(audio_path):
+                seg.audio_path = audio_path
+            else:
+                raise RuntimeError(f"Batch audio not found for slide {seg.slide_number}: {audio_path}")
+
+        if progress_callback:
+            progress_callback(0.7, desc="All slide audio generated")
+    else:
+        # --- SEQUENTIAL MODE: one subprocess per segment (ElevenLabs or single slide) ---
+        for i, seg in enumerate(segments):
+            print(f"\n      Slide {seg.slide_number} ({i + 1}/{len(segments)}, {len(seg.text):,} chars) ...")
+            preview_text = seg.text[:200].replace('\n', ' ↵ ')
+            print(f"      Narration: \"{preview_text}{'...' if len(seg.text) > 200 else ''}\"")
+            audio_ext = ".wav" if config.tts_engine == "coqui_xtts" else ".mp3"
+            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}{audio_ext}")
+            generate_speech(
+                script_text=seg.text,
+                voice_id=voice_id,
+                config=config,
+                output_path=audio_path,
+            )
+            wav_alt = os.path.splitext(audio_path)[0] + ".wav"
+            mp3_alt = os.path.splitext(audio_path)[0] + ".mp3"
+            if os.path.exists(audio_path):
+                seg.audio_path = audio_path
+            elif os.path.exists(wav_alt):
+                seg.audio_path = wav_alt
+            elif os.path.exists(mp3_alt):
+                seg.audio_path = mp3_alt
+            else:
+                raise RuntimeError(f"Audio file not found for slide {seg.slide_number}: tried {audio_path}")
+
+            if progress_callback:
+                pct = 0.2 + 0.5 * ((i + 1) / len(segments))
+                progress_callback(pct, desc=f"Generated audio for slide {seg.slide_number}")
+
+    # Step 4: Create video segments (parallel) and concatenate
     print(f"\n[4/4] Assembling presentation video ...")
-    video_segments = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for i, seg in enumerate(segments):
-        print(f"      Creating video for slide {seg.slide_number} ...")
+    def _make_slide_video(seg):
+        """Worker function for parallel video assembly."""
         seg_video_path = os.path.join(segments_dir, f"segment_slide{seg.slide_number:03d}.mp4")
         create_slide_video(seg.image_path, seg.audio_path, seg_video_path)
         seg.video_path = seg_video_path
-        video_segments.append(seg_video_path)
+        return seg.slide_number, seg_video_path
 
-        if progress_callback:
-            pct = 0.7 + 0.25 * ((i + 1) / len(segments))
-            progress_callback(pct, desc=f"Created video for slide {seg.slide_number}")
+    video_segments = []
+    # Use up to 4 parallel ffmpeg workers (CPU-bound, not memory-heavy)
+    max_workers = min(4, len(segments))
+    if max_workers > 1:
+        print(f"      Creating {len(segments)} slide videos ({max_workers} parallel workers) ...")
+        video_map = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_make_slide_video, seg): seg for seg in segments}
+            for future in as_completed(futures):
+                slide_num, video_path = future.result()
+                video_map[slide_num] = video_path
+                print(f"      Slide {slide_num} video ready")
+
+        # Maintain original order
+        for seg in segments:
+            video_segments.append(video_map[seg.slide_number])
+    else:
+        for seg in segments:
+            print(f"      Creating video for slide {seg.slide_number} ...")
+            seg_video_path = os.path.join(segments_dir, f"segment_slide{seg.slide_number:03d}.mp4")
+            create_slide_video(seg.image_path, seg.audio_path, seg_video_path)
+            seg.video_path = seg_video_path
+            video_segments.append(seg_video_path)
+
+    if progress_callback:
+        progress_callback(0.95, desc="Concatenating final video...")
 
     print(f"\n      Concatenating {len(video_segments)} segments ...")
     concatenate_videos(video_segments, output_path)

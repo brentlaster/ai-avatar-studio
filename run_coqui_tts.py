@@ -292,15 +292,41 @@ def post_process_audio(wav_path: str, sample_rate: int = 24000,
     output /= window_sum
     output = output[:len(samples)]
 
-    # --- Loudness normalization ---
-    # Spectral subtraction can reduce overall volume significantly.
-    # Normalize RMS to match the original signal's loudness, then
-    # peak-limit to prevent clipping.
-    orig_rms = np.sqrt(np.mean(samples ** 2)) + 1e-10
+    # --- Loudness normalization with dynamic range compression ---
+    # XTTS v2 outputs are typically very quiet (~-38 dBFS RMS) compared to
+    # real voice recordings (~-20 dBFS RMS). Simple RMS scaling + peak limiting
+    # fails because high crest factor (peak/RMS ratio) causes the limiter to
+    # crush volume back down. Solution: compress dynamics first, then normalize.
+
+    # Step 1: Soft-knee compressor to tame peaks
+    # Process in short blocks to apply gain reduction smoothly
+    block_size = int(0.01 * sr)  # 10ms blocks
+    threshold_db = -20.0  # Start compressing above this level
+    ratio = 4.0  # 4:1 compression ratio above threshold
+    threshold_amp = 10 ** (threshold_db / 20.0)
+
+    for start in range(0, len(output), block_size):
+        end = min(start + block_size, len(output))
+        block = output[start:end]
+        block_peak = np.max(np.abs(block)) + eps
+        if block_peak > threshold_amp:
+            # How far above threshold in dB
+            excess_db = 20.0 * np.log10(block_peak / threshold_amp)
+            # Compressed excess
+            compressed_excess_db = excess_db / ratio
+            # Target peak
+            target_peak_db = threshold_db + compressed_excess_db
+            target_peak_amp = 10 ** (target_peak_db / 20.0)
+            gain = target_peak_amp / block_peak
+            output[start:end] *= gain
+
+    # Step 2: RMS normalization to target loudness
+    target_rms = 0.1  # ≈ -20 dBFS, matches typical voice recording levels
     output_rms = np.sqrt(np.mean(output ** 2)) + 1e-10
     if output_rms > 1e-8:
-        output *= orig_rms / output_rms
-    # Peak limiter
+        output *= target_rms / output_rms
+
+    # Step 3: Final peak limiter (should barely activate after compression)
     peak = np.max(np.abs(output))
     if peak > 0.95:
         output *= 0.95 / peak
@@ -353,6 +379,124 @@ def concatenate_wavs(wav_paths: list, output_path: str):
                 out.writeframes(gap)
 
 
+def _load_model(args):
+    """Load XTTS v2 model, apply GPU acceleration and inference params. Returns tts object."""
+    print("[Coqui XTTS] Loading XTTS v2 model ...")
+
+    # --- PyTorch 2.6+ compatibility fix ---
+    import torch
+    _original_torch_load = torch.load
+    def _patched_torch_load(*a, **kw):
+        kw["weights_only"] = False
+        return _original_torch_load(*a, **kw)
+    torch.load = _patched_torch_load
+    print("[Coqui XTTS] Patched torch.load for PyTorch 2.6+ compatibility")
+
+    try:
+        from TTS.api import TTS
+    except ImportError:
+        print("ERROR: Coqui TTS not installed. Install with: pip install TTS", file=sys.stderr)
+        sys.exit(1)
+
+    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
+
+    # Try GPU acceleration
+    try:
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            tts = tts.to("mps")
+            print("[Coqui XTTS] Using MPS (Apple Silicon GPU)")
+        elif torch.cuda.is_available():
+            tts = tts.to("cuda")
+            print("[Coqui XTTS] Using CUDA GPU")
+        else:
+            print("[Coqui XTTS] Using CPU")
+    except Exception:
+        print("[Coqui XTTS] Using CPU (GPU detection failed)")
+
+    # --- Tune inference parameters ---
+    try:
+        model = tts.synthesizer.tts_model
+        if hasattr(model, 'config') and hasattr(model.config, 'model_args'):
+            model.config.model_args.temperature = args.temperature
+            model.config.model_args.repetition_penalty = args.repetition_penalty
+            model.config.model_args.top_k = 80
+            model.config.model_args.top_p = args.top_p
+            model.config.model_args.length_penalty = 1.0
+            print(f"[Coqui XTTS] Set inference params: temperature={args.temperature}, "
+                  f"repetition_penalty={args.repetition_penalty}, top_p={args.top_p}")
+    except Exception as e:
+        print(f"[Coqui XTTS] Could not set inference params: {e}")
+
+    return tts
+
+
+def generate_one(tts, text: str, speaker_wav: str, language: str, output_path: str, args):
+    """Generate speech for a single text, handling chunking, concatenation, and post-processing."""
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    chunks = split_text_into_chunks(text, max_chars=220)
+    print(f"[Coqui XTTS] Split into {len(chunks)} chunk(s)")
+
+    if len(chunks) == 1:
+        print(f"[Coqui XTTS] Generating speech ({len(chunks[0])} chars) ...")
+        tts.tts_to_file(
+            text=chunks[0],
+            speaker_wav=speaker_wav,
+            language=language,
+            file_path=output_path,
+        )
+    else:
+        chunk_paths = []
+        tmp_dir = os.path.join(os.path.dirname(os.path.abspath(output_path)), "_tts_chunks")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        for i, chunk in enumerate(chunks):
+            chunk_path = os.path.join(tmp_dir, f"chunk_{i:04d}.wav")
+            print(f"[Coqui XTTS] Chunk {i+1}/{len(chunks)} ({len(chunk)} chars): {chunk[:60]}...")
+            tts.tts_to_file(
+                text=chunk,
+                speaker_wav=speaker_wav,
+                language=language,
+                file_path=chunk_path,
+            )
+            if os.path.exists(chunk_path):
+                chunk_paths.append(chunk_path)
+            else:
+                print(f"WARNING: Chunk {i+1} failed to generate, skipping.", file=sys.stderr)
+
+        if not chunk_paths:
+            print("ERROR: No audio chunks were generated.", file=sys.stderr)
+            return False
+
+        print(f"[Coqui XTTS] Concatenating {len(chunk_paths)} chunks ...")
+        concatenate_wavs(chunk_paths, output_path)
+
+        for cp in chunk_paths:
+            try:
+                os.remove(cp)
+            except Exception:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
+
+    if os.path.exists(output_path):
+        try:
+            post_process_audio(output_path, sample_rate=24000,
+                               bass_boost_db=args.bass_boost_db,
+                               high_cut_db=args.high_cut_db)
+        except Exception as e:
+            print(f"[Coqui XTTS] Post-processing skipped: {e}")
+
+        size_kb = os.path.getsize(output_path) / 1024
+        print(f"[Coqui XTTS] Success! Output: {output_path} ({size_kb:.1f} KB)")
+        return True
+    else:
+        print("ERROR: Output file was not created.", file=sys.stderr)
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Coqui XTTS v2 TTS wrapper")
     parser.add_argument("--text", type=str, default="", help="Text to speak")
@@ -365,9 +509,69 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.95, help="Sampling breadth (0.5-1.0)")
     parser.add_argument("--bass_boost_db", type=float, default=1.0, help="Post-processing bass EQ dB")
     parser.add_argument("--high_cut_db", type=float, default=-0.5, help="Post-processing high-shelf EQ dB")
+    parser.add_argument("--batch_json", type=str, default="",
+                        help="Path to JSON file for batch mode: [{\"text_file\": ..., \"output\": ...}, ...]. "
+                             "Model loads once and generates all items sequentially. Much faster for "
+                             "multiple segments (e.g., presentation slides).")
     args = parser.parse_args()
 
-    # Get the text to synthesize
+    # ----------------------------------------------------------------
+    # BATCH MODE: load model once, generate multiple outputs
+    # ----------------------------------------------------------------
+    if args.batch_json and os.path.exists(args.batch_json):
+        with open(args.batch_json, "r", encoding="utf-8") as f:
+            batch_items = json.load(f)
+
+        print(f"[Coqui XTTS] BATCH MODE: {len(batch_items)} items to generate")
+        print(f"[Coqui XTTS] Speaker WAV: {args.speaker_wav}")
+
+        if not os.path.exists(args.speaker_wav):
+            print(f"ERROR: Speaker WAV not found: {args.speaker_wav}", file=sys.stderr)
+            sys.exit(1)
+
+        # Load model ONCE
+        tts = _load_model(args)
+
+        results = {"success": [], "failed": []}
+        for i, item in enumerate(batch_items):
+            text_file = item.get("text_file", "")
+            output = item.get("output", "")
+            label = item.get("label", f"item {i+1}")
+
+            if not text_file or not os.path.exists(text_file):
+                print(f"\n[Coqui XTTS] Batch {i+1}/{len(batch_items)}: SKIPPED (text_file missing: {text_file})")
+                results["failed"].append(output)
+                continue
+
+            with open(text_file, "r", encoding="utf-8") as tf:
+                text = tf.read().strip()
+
+            if not text:
+                print(f"\n[Coqui XTTS] Batch {i+1}/{len(batch_items)}: SKIPPED (empty text)")
+                results["failed"].append(output)
+                continue
+
+            print(f"\n[Coqui XTTS] Batch {i+1}/{len(batch_items)} — {label} ({len(text):,} chars)")
+            ok = generate_one(tts, text, args.speaker_wav, args.language, output, args)
+            if ok:
+                results["success"].append(output)
+            else:
+                results["failed"].append(output)
+
+        # Write results JSON so the caller knows what succeeded
+        results_path = args.batch_json.replace(".json", "_results.json")
+        with open(results_path, "w") as rf:
+            json.dump(results, rf, indent=2)
+
+        print(f"\n[Coqui XTTS] Batch complete: {len(results['success'])} succeeded, "
+              f"{len(results['failed'])} failed")
+        if results["failed"]:
+            sys.exit(1)
+        sys.exit(0)
+
+    # ----------------------------------------------------------------
+    # SINGLE MODE: original behavior
+    # ----------------------------------------------------------------
     if args.text_file and os.path.exists(args.text_file):
         with open(args.text_file, "r", encoding="utf-8") as f:
             text = f.read().strip()
@@ -390,149 +594,10 @@ def main():
     print(f"[Coqui XTTS] Language: {args.language}")
     print(f"[Coqui XTTS] Output: {args.output}")
 
-    # Import and load model
-    print("[Coqui XTTS] Loading XTTS v2 model ...")
+    tts = _load_model(args)
 
-    # --- PyTorch 2.6+ compatibility fix ---
-    # PyTorch 2.6 changed torch.load to weights_only=True by default,
-    # which breaks Coqui TTS checkpoint loading (it uses pickle-based
-    # custom classes like XttsConfig, BaseDatasetConfig, etc.).
-    # The XTTS model is from Coqui's official repo, so this is safe.
-    import torch
-    _original_torch_load = torch.load
-    def _patched_torch_load(*args, **kwargs):
-        kwargs["weights_only"] = False
-        return _original_torch_load(*args, **kwargs)
-    torch.load = _patched_torch_load
-    print("[Coqui XTTS] Patched torch.load for PyTorch 2.6+ compatibility")
-
-    try:
-        from TTS.api import TTS
-    except ImportError:
-        print(
-            "ERROR: Coqui TTS not installed in this environment.\n"
-            "Install with: pip install TTS",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
-
-    # Try GPU acceleration
-    try:
-        import torch
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            tts = tts.to("mps")
-            print("[Coqui XTTS] Using MPS (Apple Silicon GPU)")
-        elif torch.cuda.is_available():
-            tts = tts.to("cuda")
-            print("[Coqui XTTS] Using CUDA GPU")
-        else:
-            print("[Coqui XTTS] Using CPU")
-    except Exception:
-        print("[Coqui XTTS] Using CPU (GPU detection failed)")
-
-    # Generate speech — split into <=220 char chunks (XTTS limit is ~250)
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-
-    chunks = split_text_into_chunks(text, max_chars=220)
-    print(f"[Coqui XTTS] Split into {len(chunks)} chunk(s)")
-
-    # --- Tune XTTS inference parameters for better quality ---
-    # Adjust temperature and repetition_penalty on the model config
-    # BEFORE calling tts_to_file(). This keeps the high-level API's
-    # correct sample-rate handling while reducing warble/artifacts.
-    #
-    # Tuned via spectral analysis comparing real voice vs generated:
-    #   Real voice:  pitch_std=28.3Hz, range=238Hz, flatness=0.0005, bass=23.3%, HNR=0.79
-    #   Generated:   pitch_std=23.5Hz, range=140Hz, flatness=0.131,  bass=19.0%, HNR=0.56
-    #
-    # Key issues: monotone pitch, high spectral flatness (robotic buzz), weak bass
-    #
-    # temperature: Controls randomness / expressiveness.
-    #   - 0.55 was too constrained → monotone, narrow pitch range
-    #   - 0.68 restores natural pitch variation without going unstable
-    # repetition_penalty: Reduces repeated artifacts and gibberish.
-    #   - 3.0 was over-regularizing → flat prosody
-    #   - 2.0 lets more natural pitch contour through
-    # top_p: Broader sampling = more natural variation.
-    #   - 0.85 was too narrow → monotone
-    #   - 0.92 allows richer expressiveness
-    try:
-        model = tts.synthesizer.tts_model
-        if hasattr(model, 'config') and hasattr(model.config, 'model_args'):
-            model.config.model_args.temperature = args.temperature
-            model.config.model_args.repetition_penalty = args.repetition_penalty
-            model.config.model_args.top_k = 80
-            model.config.model_args.top_p = args.top_p
-            model.config.model_args.length_penalty = 1.0
-            print(f"[Coqui XTTS] Set inference params: temperature={args.temperature}, repetition_penalty={args.repetition_penalty}, top_p={args.top_p}")
-        elif hasattr(model, 'inference'):
-            print("[Coqui XTTS] Model config structure not as expected, using defaults")
-    except Exception as e:
-        print(f"[Coqui XTTS] Could not set inference params: {e}")
-
-    if len(chunks) == 1:
-        # Single chunk — generate directly to output
-        print(f"[Coqui XTTS] Generating speech ({len(chunks[0])} chars) ...")
-        tts.tts_to_file(
-            text=chunks[0],
-            speaker_wav=args.speaker_wav,
-            language=args.language,
-            file_path=args.output,
-        )
-    else:
-        # Multiple chunks — generate each, then concatenate
-        import tempfile
-        chunk_paths = []
-        tmp_dir = os.path.join(os.path.dirname(os.path.abspath(args.output)), "_tts_chunks")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        for i, chunk in enumerate(chunks):
-            chunk_path = os.path.join(tmp_dir, f"chunk_{i:04d}.wav")
-            print(f"[Coqui XTTS] Chunk {i+1}/{len(chunks)} ({len(chunk)} chars): {chunk[:60]}...")
-            tts.tts_to_file(
-                text=chunk,
-                speaker_wav=args.speaker_wav,
-                language=args.language,
-                file_path=chunk_path,
-            )
-            if os.path.exists(chunk_path):
-                chunk_paths.append(chunk_path)
-            else:
-                print(f"WARNING: Chunk {i+1} failed to generate, skipping.", file=sys.stderr)
-
-        if not chunk_paths:
-            print("ERROR: No audio chunks were generated.", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"[Coqui XTTS] Concatenating {len(chunk_paths)} chunks ...")
-        concatenate_wavs(chunk_paths, args.output)
-
-        # Clean up chunk files
-        for cp in chunk_paths:
-            try:
-                os.remove(cp)
-            except Exception:
-                pass
-        try:
-            os.rmdir(tmp_dir)
-        except Exception:
-            pass
-
-    if os.path.exists(args.output):
-        # --- Post-process for warmth and clarity ---
-        try:
-            post_process_audio(args.output, sample_rate=24000,
-                               bass_boost_db=args.bass_boost_db,
-                               high_cut_db=args.high_cut_db)
-        except Exception as e:
-            print(f"[Coqui XTTS] Post-processing skipped: {e}")
-
-        size_kb = os.path.getsize(args.output) / 1024
-        print(f"[Coqui XTTS] Success! Output: {args.output} ({size_kb:.1f} KB)")
-    else:
-        print("ERROR: Output file was not created.", file=sys.stderr)
+    ok = generate_one(tts, text, args.speaker_wav, args.language, args.output, args)
+    if not ok:
         sys.exit(1)
 
 

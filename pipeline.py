@@ -465,6 +465,120 @@ def _generate_speech_coqui(
     return output_path
 
 
+def _generate_speech_coqui_batch(
+    items: list,
+    config: AvatarConfig,
+) -> list:
+    """
+    Batch-generate speech for multiple text segments using Coqui XTTS v2.
+
+    Loads the model ONCE and processes all items sequentially — much faster
+    than spawning a separate subprocess per segment (saves ~15-20s model
+    load time per item for presentations with many slides).
+
+    Args:
+        items: List of dicts with keys:
+            - "text": the script text to synthesize
+            - "output_path": where to save the .wav file
+            - "label": optional label for logging (e.g., "Slide 3")
+        config: AvatarConfig with voice_sample_path and Coqui params set.
+
+    Returns:
+        List of output paths that were successfully generated.
+    """
+    voice_sample = config.voice_sample_path
+    if not voice_sample or not os.path.exists(voice_sample):
+        raise ValueError("Coqui XTTS requires a voice sample for cloning.")
+
+    python_path = _find_tts_python()
+    if python_path is None:
+        raise RuntimeError("No compatible conda environment found for Coqui TTS.")
+
+    project_dir = Path(__file__).parent.resolve()
+    wrapper_script = str(project_dir / "run_coqui_tts.py")
+
+    # Write batch JSON file
+    batch_dir = os.path.join(TEMP_DIR, "_batch")
+    os.makedirs(batch_dir, exist_ok=True)
+
+    batch_items = []
+    for i, item in enumerate(items):
+        text = item["text"]
+        output_path = item["output_path"]
+        label = item.get("label", f"item {i+1}")
+
+        # Ensure .wav extension
+        if not output_path.endswith(".wav"):
+            output_path = os.path.splitext(output_path)[0] + ".wav"
+            item["output_path"] = output_path
+
+        # Write text to temp file
+        text_file = os.path.join(batch_dir, f"batch_text_{i:03d}.txt")
+        with open(text_file, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        batch_items.append({
+            "text_file": text_file,
+            "output": output_path,
+            "label": label,
+        })
+
+    batch_json_path = os.path.join(batch_dir, "batch.json")
+    with open(batch_json_path, "w") as f:
+        import json as _json
+        _json.dump(batch_items, f, indent=2)
+
+    print(f"[Coqui XTTS Batch] Generating {len(batch_items)} segments in one model load ...")
+
+    cmd = [
+        python_path,
+        wrapper_script,
+        "--speaker_wav", voice_sample,
+        "--output", os.path.join(batch_dir, "unused.wav"),  # Required arg, not used in batch mode
+        "--language", config.coqui_language,
+        "--temperature", str(config.coqui_temperature),
+        "--repetition_penalty", str(config.coqui_repetition_penalty),
+        "--top_p", str(config.coqui_top_p),
+        "--bass_boost_db", str(config.coqui_bass_boost_db),
+        "--high_cut_db", str(config.coqui_high_cut_db),
+        "--batch_json", batch_json_path,
+    ]
+
+    result = subprocess.run(cmd, cwd=str(project_dir), timeout=1800)  # 30min timeout for large batches
+
+    # Read results
+    results_path = batch_json_path.replace(".json", "_results.json")
+    success_paths = []
+    if os.path.exists(results_path):
+        import json as _json
+        with open(results_path) as rf:
+            results = _json.load(rf)
+        success_paths = results.get("success", [])
+        failed = results.get("failed", [])
+        if failed:
+            print(f"[Coqui XTTS Batch] WARNING: {len(failed)} items failed")
+    elif result.returncode != 0:
+        raise RuntimeError(f"Coqui XTTS batch failed (exit code {result.returncode})")
+
+    # Clean up temp text files
+    for item in batch_items:
+        try:
+            os.remove(item["text_file"])
+        except OSError:
+            pass
+    for f_path in [batch_json_path, results_path]:
+        try:
+            os.remove(f_path)
+        except OSError:
+            pass
+    try:
+        os.rmdir(batch_dir)
+    except OSError:
+        pass
+
+    return success_paths
+
+
 # ---------------------------------------------------------------------------
 # ElevenLabs TTS — API-based, paid
 # ---------------------------------------------------------------------------
