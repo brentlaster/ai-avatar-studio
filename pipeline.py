@@ -40,7 +40,11 @@ class AvatarConfig:
 
     # Coqui XTTS settings (only used when tts_engine="coqui_xtts")
     coqui_language: str = "en"          # language code for XTTS
-    coqui_temperature: float = 0.65     # lower = more stable, higher = more expressive
+    coqui_temperature: float = 0.75     # 0.1-1.0: lower = stable/monotone, higher = expressive
+    coqui_repetition_penalty: float = 1.8  # 1.0-5.0: higher = fewer artifacts, less natural
+    coqui_top_p: float = 0.95          # 0.5-1.0: breadth of sampling (higher = more varied)
+    coqui_bass_boost_db: float = 1.0   # -3 to +6 dB: post-processing low-shelf EQ below 250Hz
+    coqui_high_cut_db: float = -0.5    # -6 to +3 dB: post-processing high-shelf EQ above 4kHz
     coqui_speed: float = 1.0            # speech speed multiplier
 
     # Voice sample path for Coqui XTTS voice cloning
@@ -427,6 +431,11 @@ def _generate_speech_coqui(
             "--speaker_wav", voice_sample,
             "--output", chunk_out,
             "--language", config.coqui_language,
+            "--temperature", str(config.coqui_temperature),
+            "--repetition_penalty", str(config.coqui_repetition_penalty),
+            "--top_p", str(config.coqui_top_p),
+            "--bass_boost_db", str(config.coqui_bass_boost_db),
+            "--high_cut_db", str(config.coqui_high_cut_db),
         ]
 
         print(f"      Running: {python_path} run_coqui_tts.py ...")

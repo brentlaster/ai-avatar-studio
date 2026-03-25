@@ -68,6 +68,12 @@ echo ""
 echo "Pinning transformers to compatible version..."
 "$CONDA_PIP" install --no-cache-dir "transformers>=4.33,<4.45"
 
+
+# NOTE: pip may show dependency-resolver warnings about numpy and networkx.
+# Coqui TTS 0.22.0 has overly strict pins (numpy==1.22.0, networkx<3)
+# but works fine at runtime with the newer versions PyTorch installs.
+# These warnings are safe to ignore.
+
 # --- Quick sanity check ---
 echo ""
 echo "Verifying installation..."

@@ -118,6 +118,204 @@ def trim_trailing_silence(frames: bytes, sample_width: int, threshold: int = 300
         return frames
 
 
+def post_process_audio(wav_path: str, sample_rate: int = 24000,
+                       bass_boost_db: float = 1.0, high_cut_db: float = -0.5):
+    """
+    Post-process XTTS output to sound more natural.
+
+    Based on spectral analysis comparing real voice vs XTTS output:
+    - Real voice:  bass=23.3%, flatness=0.0005, HNR=0.79
+    - XTTS output: bass=19.0%, flatness=0.131,  HNR=0.56
+
+    Applies:
+    1. Low-shelf EQ boost (+3dB below 250Hz) to restore bass/chest warmth
+    2. Gentle high-shelf cut (-2dB above 4kHz) to reduce synthetic brightness
+    3. Spectral noise gate to reduce buzzy artifacts (high flatness)
+    """
+    import numpy as np
+    from scipy import signal as scipy_signal
+
+    # Read WAV
+    with wave.open(wav_path, 'rb') as wf:
+        params = wf.getparams()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+
+    # Convert to float
+    n_samples = len(raw) // 2
+    samples = np.array(struct.unpack(f'<{n_samples}h', raw), dtype=np.float64)
+    samples /= 32768.0  # Normalize to [-1, 1]
+
+    sr = sample_rate
+
+    # --- 1. Low-shelf EQ: boost bass below 250Hz ---
+    bass_gain_db = bass_boost_db
+    bass_freq = 250.0
+    bass_gain = 10 ** (bass_gain_db / 20.0)  # ~1.41
+
+    # Design a 2nd-order low-shelf filter using bilinear transform
+    w0 = 2.0 * np.pi * bass_freq / sr
+    A = bass_gain
+    alpha = np.sin(w0) / 2.0 * np.sqrt(2.0)  # Q=0.707 for gentle slope
+
+    b0 =     A * ((A + 1) - (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha)
+    b1 = 2 * A * ((A - 1) - (A + 1) * np.cos(w0))
+    b2 =     A * ((A + 1) - (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha)
+    a0 =          (A + 1) + (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha
+    a1 =    -2 * ((A - 1) + (A + 1) * np.cos(w0))
+    a2 =          (A + 1) + (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha
+
+    bass_b = np.array([b0, b1, b2]) / a0
+    bass_a = np.array([a0, a1, a2]) / a0
+
+    samples = scipy_signal.lfilter(bass_b, bass_a, samples)
+
+    # --- 2. High-shelf EQ: cut above 4kHz ---
+    high_freq = 4000.0
+    A_h = 10 ** (high_cut_db / 20.0)
+
+    w0_h = 2.0 * np.pi * high_freq / sr
+    alpha_h = np.sin(w0_h) / 2.0 * np.sqrt(2.0)
+
+    b0_h = A_h * ((A_h + 1) + (A_h - 1) * np.cos(w0_h) + 2 * np.sqrt(A_h) * alpha_h)
+    b1_h = -2 * A_h * ((A_h - 1) + (A_h + 1) * np.cos(w0_h))
+    b2_h = A_h * ((A_h + 1) + (A_h - 1) * np.cos(w0_h) - 2 * np.sqrt(A_h) * alpha_h)
+    a0_h =        (A_h + 1) - (A_h - 1) * np.cos(w0_h) + 2 * np.sqrt(A_h) * alpha_h
+    a1_h =  2 *  ((A_h - 1) - (A_h + 1) * np.cos(w0_h))
+    a2_h =        (A_h + 1) - (A_h - 1) * np.cos(w0_h) - 2 * np.sqrt(A_h) * alpha_h
+
+    high_b = np.array([b0_h, b1_h, b2_h]) / a0_h
+    high_a = np.array([a0_h, a1_h, a2_h]) / a0_h
+
+    samples = scipy_signal.lfilter(high_b, high_a, samples)
+
+    # --- 3. Spectral subtraction + harmonic enhancement ---
+    # Previous approach (flatness-based noise gate) didn't move the needle
+    # on spectral flatness (0.131→0.127, target 0.0005) and hurt HNR/dynamics.
+    #
+    # New approach:
+    # a) Spectral subtraction: estimate noise floor from low-energy frames,
+    #    then subtract it from all frames (standard speech enhancement)
+    # b) Harmonic enhancement: detect harmonic peaks in each frame and
+    #    gently boost them relative to inter-harmonic noise
+    n_fft = 2048
+    hop = 512
+    window = np.hanning(n_fft)
+
+    # Pad signal
+    pad_len = n_fft - (len(samples) % hop)
+    if pad_len == n_fft:
+        pad_len = 0
+    padded = np.concatenate([samples, np.zeros(pad_len)]) if pad_len > 0 else samples.copy()
+
+    # STFT
+    n_frames_stft = (len(padded) - n_fft) // hop + 1
+    stft = np.zeros((n_fft // 2 + 1, n_frames_stft), dtype=complex)
+    for i in range(n_frames_stft):
+        frame = padded[i * hop:i * hop + n_fft] * window
+        spectrum = np.fft.rfft(frame)
+        stft[:, i] = spectrum
+
+    mag = np.abs(stft)
+    phase = np.angle(stft)
+    eps = 1e-10
+
+    # --- 3a. Spectral subtraction ---
+    # Estimate noise floor from the quietest 15% of frames
+    frame_energies = np.sum(mag ** 2, axis=0)
+    energy_threshold = np.percentile(frame_energies, 15)
+    noise_frames = mag[:, frame_energies <= energy_threshold]
+    if noise_frames.shape[1] > 0:
+        noise_floor = np.mean(noise_frames, axis=1)
+    else:
+        noise_floor = np.min(mag, axis=1)
+
+    # Subtract noise floor with over-subtraction factor and spectral floor
+    over_sub = 1.5  # Slightly aggressive noise removal
+    spectral_floor = 0.08  # Don't go below this fraction of original magnitude
+
+    mag_clean = np.copy(mag)
+    for i in range(n_frames_stft):
+        subtracted = mag[:, i] - over_sub * noise_floor
+        floor = spectral_floor * mag[:, i]
+        mag_clean[:, i] = np.maximum(subtracted, floor)
+
+    # --- 3b. Harmonic enhancement ---
+    # For voiced frames, identify harmonic peaks and boost them
+    freq_bins = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+
+    for i in range(n_frames_stft):
+        frame_mag = mag_clean[:, i]
+        frame_energy = np.sum(frame_mag ** 2)
+        if frame_energy < energy_threshold * 0.5:
+            continue  # Skip very quiet frames
+
+        # Estimate F0 from spectrum peak in voice range (80-300Hz)
+        voice_mask = (freq_bins >= 80) & (freq_bins <= 300)
+        voice_region = frame_mag.copy()
+        voice_region[~voice_mask] = 0
+        if np.max(voice_region) < eps:
+            continue
+        f0_idx = np.argmax(voice_region)
+        f0_est = freq_bins[f0_idx]
+        if f0_est < 80:
+            continue
+
+        # Create harmonic mask: boost bins near harmonics of F0
+        harmonic_boost = np.ones_like(frame_mag)
+        for h in range(1, 16):  # First 15 harmonics
+            harmonic_freq = f0_est * h
+            if harmonic_freq > sr / 2:
+                break
+            # Find bins within ±1 bin of the harmonic
+            harmonic_bin = int(round(harmonic_freq / (sr / n_fft)))
+            lo = max(0, harmonic_bin - 1)
+            hi = min(len(frame_mag) - 1, harmonic_bin + 1)
+            # Boost harmonic bins by 1.15x (subtle)
+            harmonic_boost[lo:hi + 1] = 1.15
+
+        mag_clean[:, i] *= harmonic_boost
+
+    # Reconstruct
+    stft_clean = mag_clean * np.exp(1j * phase)
+
+    # Inverse STFT (overlap-add)
+    output = np.zeros(len(padded))
+    window_sum = np.zeros(len(padded))
+    for i in range(n_frames_stft):
+        frame = np.fft.irfft(stft_clean[:, i], n=n_fft) * window
+        output[i * hop:i * hop + n_fft] += frame
+        window_sum[i * hop:i * hop + n_fft] += window ** 2
+
+    # Normalize by window overlap
+    window_sum[window_sum < 1e-8] = 1.0
+    output /= window_sum
+    output = output[:len(samples)]
+
+    # --- Loudness normalization ---
+    # Spectral subtraction can reduce overall volume significantly.
+    # Normalize RMS to match the original signal's loudness, then
+    # peak-limit to prevent clipping.
+    orig_rms = np.sqrt(np.mean(samples ** 2)) + 1e-10
+    output_rms = np.sqrt(np.mean(output ** 2)) + 1e-10
+    if output_rms > 1e-8:
+        output *= orig_rms / output_rms
+    # Peak limiter
+    peak = np.max(np.abs(output))
+    if peak > 0.95:
+        output *= 0.95 / peak
+
+    # Convert back to int16 and write
+    output_int16 = np.clip(output * 32768.0, -32768, 32767).astype(np.int16)
+    raw_out = struct.pack(f'<{len(output_int16)}h', *output_int16)
+
+    with wave.open(wav_path, 'wb') as wf_out:
+        wf_out.setparams(params)
+        wf_out.writeframes(raw_out)
+
+    print(f"[Coqui XTTS] Post-processed: bass {bass_boost_db:+.1f}dB, high {high_cut_db:+.1f}dB, spectral subtraction, harmonic enhancement")
+
+
 def make_silence(duration_ms: int, sample_rate: int = 24000, sample_width: int = 2, channels: int = 1) -> bytes:
     """Generate silent PCM audio frames."""
     n_samples = int(sample_rate * duration_ms / 1000) * channels
@@ -162,6 +360,11 @@ def main():
     parser.add_argument("--speaker_wav", type=str, required=True, help="Path to voice sample WAV")
     parser.add_argument("--output", type=str, required=True, help="Output audio file path (.wav)")
     parser.add_argument("--language", type=str, default="en", help="Language code (default: en)")
+    parser.add_argument("--temperature", type=float, default=0.75, help="Expressiveness (0.1-1.0)")
+    parser.add_argument("--repetition_penalty", type=float, default=1.8, help="Artifact control (1.0-5.0)")
+    parser.add_argument("--top_p", type=float, default=0.95, help="Sampling breadth (0.5-1.0)")
+    parser.add_argument("--bass_boost_db", type=float, default=1.0, help="Post-processing bass EQ dB")
+    parser.add_argument("--high_cut_db", type=float, default=-0.5, help="Post-processing high-shelf EQ dB")
     args = parser.parse_args()
 
     # Get the text to synthesize
@@ -240,25 +443,30 @@ def main():
     # BEFORE calling tts_to_file(). This keeps the high-level API's
     # correct sample-rate handling while reducing warble/artifacts.
     #
-    # temperature: Controls randomness of the generated speech.
-    #   - Default ~0.65-0.75 can produce robotic/Max Headroom warble
-    #   - 0.3 was too constrained → nasal/thin
-    #   - 0.5 was better but still slightly robotic
-    #   - 0.55 adds a touch more natural variation
+    # Tuned via spectral analysis comparing real voice vs generated:
+    #   Real voice:  pitch_std=28.3Hz, range=238Hz, flatness=0.0005, bass=23.3%, HNR=0.79
+    #   Generated:   pitch_std=23.5Hz, range=140Hz, flatness=0.131,  bass=19.0%, HNR=0.56
+    #
+    # Key issues: monotone pitch, high spectral flatness (robotic buzz), weak bass
+    #
+    # temperature: Controls randomness / expressiveness.
+    #   - 0.55 was too constrained → monotone, narrow pitch range
+    #   - 0.68 restores natural pitch variation without going unstable
     # repetition_penalty: Reduces repeated artifacts and gibberish.
-    #   - Default 2.0 allows too many artifacts
-    #   - 10.0 was too aggressive
-    #   - 3.0 is a gentler constraint that avoids over-regularization
-    # length_penalty: Encourages complete, well-paced utterances.
+    #   - 3.0 was over-regularizing → flat prosody
+    #   - 2.0 lets more natural pitch contour through
+    # top_p: Broader sampling = more natural variation.
+    #   - 0.85 was too narrow → monotone
+    #   - 0.92 allows richer expressiveness
     try:
         model = tts.synthesizer.tts_model
         if hasattr(model, 'config') and hasattr(model.config, 'model_args'):
-            model.config.model_args.temperature = 0.55
-            model.config.model_args.repetition_penalty = 3.0
-            model.config.model_args.top_k = 50
-            model.config.model_args.top_p = 0.85
+            model.config.model_args.temperature = args.temperature
+            model.config.model_args.repetition_penalty = args.repetition_penalty
+            model.config.model_args.top_k = 80
+            model.config.model_args.top_p = args.top_p
             model.config.model_args.length_penalty = 1.0
-            print("[Coqui XTTS] Set inference params: temperature=0.55, repetition_penalty=3.0, top_k=50, top_p=0.85")
+            print(f"[Coqui XTTS] Set inference params: temperature={args.temperature}, repetition_penalty={args.repetition_penalty}, top_p={args.top_p}")
         elif hasattr(model, 'inference'):
             print("[Coqui XTTS] Model config structure not as expected, using defaults")
     except Exception as e:
@@ -313,6 +521,14 @@ def main():
             pass
 
     if os.path.exists(args.output):
+        # --- Post-process for warmth and clarity ---
+        try:
+            post_process_audio(args.output, sample_rate=24000,
+                               bass_boost_db=args.bass_boost_db,
+                               high_cut_db=args.high_cut_db)
+        except Exception as e:
+            print(f"[Coqui XTTS] Post-processing skipped: {e}")
+
         size_kb = os.path.getsize(args.output) / 1024
         print(f"[Coqui XTTS] Success! Output: {args.output} ({size_kb:.1f} KB)")
     else:

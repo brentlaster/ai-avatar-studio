@@ -377,6 +377,11 @@ def run_pipeline(
     voice_similarity,
     voice_style,
     voice_speaker_boost,
+    coqui_temperature,
+    coqui_repetition_penalty,
+    coqui_top_p,
+    coqui_bass_boost,
+    coqui_high_cut,
     video_backend,
     sadtalker_enhancer,
     sadtalker_still,
@@ -419,6 +424,11 @@ def run_pipeline(
         voice_similarity=voice_similarity,
         voice_style=voice_style,
         voice_speaker_boost=voice_speaker_boost,
+        coqui_temperature=float(coqui_temperature),
+        coqui_repetition_penalty=float(coqui_repetition_penalty),
+        coqui_top_p=float(coqui_top_p),
+        coqui_bass_boost_db=float(coqui_bass_boost),
+        coqui_high_cut_db=float(coqui_high_cut),
         voice_sample_path=voice_sample,
         video_backend=video_backend.lower(),
         sadtalker_enhancer=sadtalker_enhancer.lower() if sadtalker_enhancer else "gfpgan",
@@ -664,7 +674,8 @@ with gr.Blocks(
                         "Refresh voice list", size="sm", visible=False,
                     )
 
-                    with gr.Accordion("Voice Settings", open=True):
+                    with gr.Accordion("ElevenLabs Voice Settings", open=False):
+                        gr.Markdown("*These settings only apply when using the ElevenLabs TTS engine.*")
                         voice_model = gr.Dropdown(
                             choices=[
                                 ("Multilingual v2 (best quality)", "eleven_multilingual_v2"),
@@ -694,6 +705,34 @@ with gr.Blocks(
                         voice_speaker_boost = gr.Checkbox(
                             label="Speaker boost (enhances clarity and presence)",
                             value=True,
+                        )
+
+                    with gr.Accordion("Coqui XTTS Voice Settings", open=False):
+                        gr.Markdown("*These settings only apply when using the Coqui XTTS v2 engine.*")
+                        coqui_temperature = gr.Slider(
+                            minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                            label="Temperature (expressiveness)",
+                            info="Lower = stable/monotone, higher = expressive/varied pitch",
+                        )
+                        coqui_repetition_penalty = gr.Slider(
+                            minimum=1.0, maximum=5.0, value=1.8, step=0.1,
+                            label="Repetition penalty",
+                            info="Higher = fewer artifacts but less natural prosody",
+                        )
+                        coqui_top_p = gr.Slider(
+                            minimum=0.5, maximum=1.0, value=0.95, step=0.05,
+                            label="Top P (sampling breadth)",
+                            info="Higher = more varied/natural, lower = more consistent",
+                        )
+                        coqui_bass_boost = gr.Slider(
+                            minimum=-3.0, maximum=6.0, value=1.0, step=0.5,
+                            label="Bass boost (dB)",
+                            info="Post-processing EQ below 250Hz. Adds warmth/chest resonance.",
+                        )
+                        coqui_high_cut = gr.Slider(
+                            minimum=-6.0, maximum=3.0, value=-0.5, step=0.5,
+                            label="High shelf (dB)",
+                            info="Post-processing EQ above 4kHz. Negative = reduce brightness/thinness.",
                         )
 
                     generate_btn = gr.Button(
@@ -807,6 +846,11 @@ with gr.Blocks(
                     voice_similarity,
                     voice_style,
                     voice_speaker_boost,
+                    coqui_temperature,
+                    coqui_repetition_penalty,
+                    coqui_top_p,
+                    coqui_bass_boost,
+                    coqui_high_cut,
                     video_backend,
                     sadtalker_enhancer,
                     sadtalker_still,
@@ -910,7 +954,8 @@ with gr.Blocks(
                             interactive=True, visible=False,
                         )
 
-                    with gr.Accordion("Voice Settings", open=False):
+                    with gr.Accordion("ElevenLabs Voice Settings", open=False):
+                        gr.Markdown("*These settings only apply when using the ElevenLabs TTS engine.*")
                         pres_voice_model = gr.Dropdown(
                             choices=[
                                 ("Multilingual v2 (best quality)", "eleven_multilingual_v2"),
@@ -940,6 +985,34 @@ with gr.Blocks(
                         pres_speaker_boost = gr.Checkbox(
                             label="Speaker boost",
                             value=True,
+                        )
+
+                    with gr.Accordion("Coqui XTTS Voice Settings", open=False):
+                        gr.Markdown("*These settings only apply when using the Coqui XTTS v2 engine.*")
+                        pres_coqui_temperature = gr.Slider(
+                            minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                            label="Temperature (expressiveness)",
+                            info="Lower = stable/monotone, higher = expressive/varied pitch",
+                        )
+                        pres_coqui_repetition_penalty = gr.Slider(
+                            minimum=1.0, maximum=5.0, value=1.8, step=0.1,
+                            label="Repetition penalty",
+                            info="Higher = fewer artifacts but less natural prosody",
+                        )
+                        pres_coqui_top_p = gr.Slider(
+                            minimum=0.5, maximum=1.0, value=0.95, step=0.05,
+                            label="Top P (sampling breadth)",
+                            info="Higher = more varied/natural, lower = more consistent",
+                        )
+                        pres_coqui_bass_boost = gr.Slider(
+                            minimum=-3.0, maximum=6.0, value=1.0, step=0.5,
+                            label="Bass boost (dB)",
+                            info="Post-processing EQ below 250Hz. Adds warmth/chest resonance.",
+                        )
+                        pres_coqui_high_cut = gr.Slider(
+                            minimum=-6.0, maximum=3.0, value=-0.5, step=0.5,
+                            label="High shelf (dB)",
+                            info="Post-processing EQ above 4kHz. Negative = reduce brightness/thinness.",
                         )
 
                     with gr.Row():
@@ -1089,6 +1162,11 @@ with gr.Blocks(
                 similarity,
                 style,
                 speaker_boost,
+                pres_coqui_temp,
+                pres_coqui_rep_pen,
+                pres_coqui_tp,
+                pres_coqui_bass,
+                pres_coqui_high,
                 start_slide,
                 end_slide,
                 output_name,
@@ -1121,6 +1199,11 @@ with gr.Blocks(
                     voice_similarity=similarity,
                     voice_style=style,
                     voice_speaker_boost=speaker_boost,
+                    coqui_temperature=float(pres_coqui_temp),
+                    coqui_repetition_penalty=float(pres_coqui_rep_pen),
+                    coqui_top_p=float(pres_coqui_tp),
+                    coqui_bass_boost_db=float(pres_coqui_bass),
+                    coqui_high_cut_db=float(pres_coqui_high),
                     voice_sample_path=voice_sample,
                 )
 
@@ -1237,6 +1320,11 @@ with gr.Blocks(
                     pres_similarity,
                     pres_style,
                     pres_speaker_boost,
+                    pres_coqui_temperature,
+                    pres_coqui_repetition_penalty,
+                    pres_coqui_top_p,
+                    pres_coqui_bass_boost,
+                    pres_coqui_high_cut,
                     pres_start_slide,
                     pres_end_slide,
                     pres_output_name,

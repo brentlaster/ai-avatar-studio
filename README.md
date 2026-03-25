@@ -54,11 +54,18 @@ Creates a talking avatar video (or audio-only) from a source video and a script.
 - **Expression intensity** — 0.5 to 3.0 (1.0 = default, higher = more expressive facial movement)
 - **Pose style** — 0 to 45 (different head movement patterns — experiment!)
 
-**Voice Settings (ElevenLabs only):**
+**ElevenLabs Voice Settings** *(only apply when using ElevenLabs TTS engine):*
 - **Stability** — lower (0.15-0.25) = more expressive/dynamic, higher (0.50+) = more consistent
 - **Similarity** — how close to the original voice (0.75-0.85 is typical)
 - **Style exaggeration** — adds emotion (0.60-0.75 for dynamic, 0.20 for clean/professional)
 - **Speaker boost** — enhances clarity and presence
+
+**Coqui XTTS Voice Settings** *(only apply when using Coqui XTTS v2 engine):*
+- **Temperature** (0.1–1.0, default 0.75) — controls pitch variation and expressiveness. Lower = stable/monotone, higher = more natural intonation. Going above 0.85 may introduce instability.
+- **Repetition penalty** (1.0–5.0, default 1.8) — reduces repeated artifacts and gibberish. Higher values make speech more consistent but can flatten prosody. Below 1.5 may produce artifacts.
+- **Top P** (0.5–1.0, default 0.95) — sampling breadth. Higher = more varied/natural speech, lower = more predictable. Values below 0.8 can sound monotone.
+- **Bass boost** (-3 to +6 dB, default +1.0) — post-processing low-shelf EQ below 250Hz. Positive values add warmth and chest resonance. Set to 0 to disable.
+- **High shelf** (-6 to +3 dB, default -0.5) — post-processing high-shelf EQ above 4kHz. Negative values reduce synthetic brightness/thinness. Set to 0 to disable.
 
 ### Tab 2: Presentation Mode
 
@@ -107,7 +114,7 @@ The script also supports titled markers like `## [SLIDE 3 — "Title Here"]`.
 - `[SLIDE N]` references in prose (like changelogs) are ignored — only markers at the start of a line are parsed
 
 **Presentation Voice Settings (recommended defaults for Coqui XTTS):**
-- The app automatically tunes XTTS inference parameters (temperature=0.55, repetition_penalty=3.0) for the best balance of natural sound and consistency
+- Temperature: 0.75, Repetition penalty: 1.8, Top P: 0.95, Bass boost: +1dB, High shelf: -0.5dB. These are tunable in the "Coqui XTTS Voice Settings" accordion in the UI. Audio is also post-processed with spectral subtraction and harmonic enhancement.
 
 **Presentation Voice Settings (recommended defaults for ElevenLabs):**
 - Stability: 0.50 (cleaner, fewer filler words)
@@ -188,6 +195,7 @@ Both Avatar Mode and Presentation Mode have a **"Use Last Files"** button at the
 - Use a clean, clear voice sample (10-30 seconds of speech, minimal background noise)
 - Longer samples generally produce better cloning
 - The WAV extracted from your source video is used as the reference — if the video audio is noisy, the clone quality suffers
+- Audio post-processing is applied automatically: +3dB low-shelf EQ (bass warmth below 250Hz), -2dB high-shelf cut (reduces synthetic brightness above 4kHz), and a spectral noise gate (attenuates buzzy/robotic frames). These settings were tuned via spectral analysis comparing real recorded speech against XTTS output.
 
 ### ElevenLabs (paid API)
 
@@ -298,7 +306,7 @@ Run `bash setup.sh` first, or manually: `pip install gradio requests ffmpeg-pyth
 Check that the `tts` conda env exists: `conda env list`. If not, run `bash setup_tts.sh`. If it exists but has issues, see "Manual Fixes" above.
 
 **Voice sounds robotic or has a "Max Headroom" warble:**
-This is an inherent limitation of XTTS v2 voice cloning, but the app auto-tunes inference parameters to minimize it. Things that help: use a longer, cleaner voice sample (10-30s of clear speech); ensure your source video has minimal background noise; try generating the same content multiple times (XTTS output varies slightly each run).
+The app applies both inference tuning (temperature=0.68, repetition_penalty=2.0, top_p=0.92) and audio post-processing (bass EQ boost, high-shelf cut, spectral noise gate) to minimize this. Some residual synthetic quality is an inherent XTTS v2 limitation. Things that help: use a longer, cleaner voice sample (10-30s of clear speech); ensure your source video has minimal background noise; try generating the same content multiple times (XTTS output varies slightly each run). For the most natural results, consider ElevenLabs as an alternative TTS engine.
 
 **Voice sounds truncated (cuts off mid-sentence):**
 This was a known issue with XTTS's 250-character limit. It should be fixed — `run_coqui_tts.py` auto-chunks text at 220 characters. If you still hear truncation, check the terminal output for chunk counts.

@@ -124,8 +124,19 @@ if [ ! -f "$SADTALKER_DIR/checkpoints/epoch_20.pth" ]; then
     echo ""
     echo "Downloading SadTalker model checkpoints..."
     cd "$SADTALKER_DIR"
+    # Create dirs with -p to avoid failure if they already exist
+    mkdir -p ./checkpoints
+    mkdir -p ./gfpgan/weights
+    # Run the download script with set +e so mkdir errors don't kill setup
+    set +e
     bash scripts/download_models.sh
+    DOWNLOAD_EXIT=$?
+    set -e
     cd "$SCRIPT_DIR"
+    if [ $DOWNLOAD_EXIT -ne 0 ]; then
+        echo "  WARNING: download_models.sh exited with code $DOWNLOAD_EXIT"
+        echo "  Checking if checkpoints are present anyway..."
+    fi
 else
     echo ""
     echo "Model checkpoints already downloaded."
