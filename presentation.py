@@ -160,47 +160,50 @@ def clean_narration_text(text: str) -> str:
 
 def parse_slide_script(script_text: str) -> list[SlideSegment]:
     """
-    Parse a script with [SLIDE N] markers into segments.
+    Parse a script with slide markers into segments.
 
-    Handles various marker formats:
+    Handles two families of marker formats:
+
+    **Bracketed** (original):
       [SLIDE 1]
       [SLIDE 3 — "Title Here"]
       ## [SLIDE 3 — "Title Here"]
-      [Slide 10]
+
+    **Heading** (markdown-native):
+      ## SLIDE 1: VERSION
+      ## SLIDE 3: A SHOW OF HANDS
+      ## Slide 10: Wrap-Up
 
     Text between markers is cleaned of markdown formatting for TTS.
-    Text before the first [SLIDE] marker is ignored.
-    The last slide's narration ends at the next [SLIDE marker or end of
-    string — anything after the final marker that isn't a [SLIDE line
-    is included only up to the next blank-line-separated heading or EOF.
+    Text before the first marker is ignored.
+    Slides whose body is just "[Skip]" are omitted.
     """
-    # Pattern matches [SLIDE N ...] at the START of a line, with optional
-    # leading markdown heading markers (## etc.).
-    # This prevents matching [SLIDE N] references embedded in prose like
-    # "Old [SLIDE 8] → [SLIDE 10]" in changelog sections.
-    pattern = r'^\s*#*\s*\[(?:[Ss][Ll][Ii][Dd][Ee])\s+(\d+)[^\]]*\]'
+    # Try bracketed format first:  [SLIDE N ...]
+    pattern_bracket = r'^\s*#*\s*\[(?:[Ss][Ll][Ii][Dd][Ee])\s+(\d+)[^\]]*\]'
+    markers = list(re.finditer(pattern_bracket, script_text, re.MULTILINE))
 
-    # Find all markers and their positions (MULTILINE so ^ matches each line start)
-    markers = list(re.finditer(pattern, script_text, re.MULTILINE))
+    # If no bracketed markers found, try heading format:  ## SLIDE N: ...
+    if not markers:
+        pattern_heading = r'^\s*#{1,6}\s+[Ss][Ll][Ii][Dd][Ee]\s+(\d+)\b[^\n]*'
+        markers = list(re.finditer(pattern_heading, script_text, re.MULTILINE))
 
     if not markers:
         raise ValueError(
-            "No [SLIDE N] markers found in the script.\n"
+            "No slide markers found in the script.\n"
             "Accepted formats:\n"
             "  [SLIDE 1]\n"
             "  [SLIDE 3 — \"Title Here\"]\n"
-            "  ## [SLIDE 3 — \"Title Here\"]\n"
+            "  ## SLIDE 3: Title Here\n"
         )
 
     # For the last marker, don't let its text run to end-of-file.
-    # Instead, find the first markdown heading (# ...) or horizontal rule
-    # (---) that appears AFTER the last marker — that's where the real
-    # script content ends and appendix/meta content begins.
+    # Find the first markdown heading that is NOT a SLIDE marker after the
+    # last slide — that's where appendix/meta content begins.
     last_marker = markers[-1]
     after_last = last_marker.end()
-    # Look for a line starting with # (but NOT a [SLIDE] line) or ---
+    # Match headings that don't start with "SLIDE" (case-insensitive)
     end_pattern = re.compile(
-        r'^\s*(?:#{1,3}\s+(?!\[(?:[Ss][Ll][Ii][Dd][Ee]))|-{3,}\s*$)',
+        r'^\s*#{1,3}\s+(?![Ss][Ll][Ii][Dd][Ee]\s)(?!\[(?:[Ss][Ll][Ii][Dd][Ee]))',
         re.MULTILINE,
     )
     end_match = end_pattern.search(script_text, after_last)
@@ -225,6 +228,11 @@ def parse_slide_script(script_text: str) -> list[SlideSegment]:
             text_end = script_boundary
 
         raw_text = script_text[text_start:text_end].strip()
+
+        # Skip slides explicitly marked [Skip]
+        if re.match(r'^\s*\[?\s*[Ss]kip\s*\]?\s*$', raw_text):
+            print(f"      [parse] Slide {slide_num}: [Skip] — omitting")
+            continue
 
         # Clean the narration text: strip markdown, handle stage directions
         clean_text = clean_narration_text(raw_text)

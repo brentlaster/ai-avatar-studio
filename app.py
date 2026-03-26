@@ -928,20 +928,14 @@ with gr.Blocks(
                 """
                 ### Presentation Recorder
 
-                Upload a **PowerPoint deck** and a **speaker script** with `[SLIDE N]`
+                Upload a **PowerPoint deck** and a **speaker script** with slide
                 markers. Each slide will be displayed as a full-screen image while your
                 cloned voice narrates the corresponding section.
 
                 **Script format:**
                 ```
-                [SLIDE 1]
-                Welcome everyone! Today we'll be talking about context engineering...
-
-                [SLIDE 2]
-                Let's start with the key insight. As you can see on this slide...
-
-                [SLIDE 3]
-                Moving on to the data. These numbers show a clear trend...
+                [SLIDE 1]                         ## SLIDE 1: TITLE
+                Welcome everyone...       — or —  Welcome everyone...
                 ```
                 """
             )
@@ -966,7 +960,7 @@ with gr.Blocks(
                     )
 
                     pres_script_file = gr.File(
-                        label="Speaker Script (.md or .txt with [SLIDE N] markers)",
+                        label="Speaker Script (.md or .txt with slide markers)",
                         file_types=[".txt", ".md", ".text"],
                         type="filepath",
                     )
@@ -1136,15 +1130,14 @@ with gr.Blocks(
                         text = read_script_file(file_path)
                         filename = Path(file_path).name
                         suffix = Path(file_path).suffix.lower()
-                        # For presentation scripts, DON'T strip [SLIDE N] markers
+                        # For presentation scripts, DON'T strip slide markers
                         # Re-read raw if it's an .md file (strip_markdown would remove them)
                         if suffix == ".md":
                             raw = Path(file_path).read_text(encoding="utf-8")
-                            # Only strip markdown OUTSIDE of [SLIDE N] markers
-                            # Actually, keep it simple: for presentation mode, don't strip
-                            # markdown at all since the [SLIDE N] markers matter
+                            # Keep it simple: for presentation mode, don't strip
+                            # markdown at all since the slide markers matter
                             text = raw.strip()
-                            info = f"Loaded **{filename}** (keeping [SLIDE N] markers intact)"
+                            info = f"Loaded **{filename}** (keeping slide markers intact)"
                         else:
                             info = f"Loaded **{filename}**"
                         return gr.update(value=text), info
@@ -1194,15 +1187,16 @@ with gr.Blocks(
                         ---
                         **How it works:**
                         1. Your .pptx slides are converted to high-res images
-                        2. Each `[SLIDE N]` section is narrated with your cloned voice
+                        2. Each slide section is narrated with your cloned voice
                         3. Each slide is shown full-screen while its narration plays
                         4. All segments are joined into one continuous video
 
                         **Tips:**
                         - Long scripts are automatically chunked (ElevenLabs 10K char limit)
                         - Use natural paragraph breaks in your script for better pacing
-                        - The `[SLIDE N]` number must match the actual slide number in your deck
+                        - The slide number must match the actual slide number in your deck
                         - You can skip slides — only referenced slides appear in the video
+                        - Both `[SLIDE N]` and `## SLIDE N: Title` formats are supported
                         """
                     )
 
@@ -1232,7 +1226,7 @@ with gr.Blocks(
                 progress=gr.Progress(),
             ):
                 if not script_text or not script_text.strip():
-                    raise gr.Error("Please enter or upload a speaker script with [SLIDE N] markers.")
+                    raise gr.Error("Please enter or upload a speaker script with slide markers ([SLIDE N] or ## SLIDE N: Title).")
 
                 if pptx_file is None:
                     raise gr.Error("Please upload a PowerPoint deck (.pptx).")
