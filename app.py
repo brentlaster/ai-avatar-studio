@@ -30,11 +30,39 @@ import shutil
 
 _LAST_FILES_JSON = os.path.join(os.path.dirname(__file__), "temp", "last_files.json")
 _LAST_FILES_DIR = os.path.join(os.path.dirname(__file__), "temp", "last_uploads")
+_SETTINGS_JSON = os.path.join(os.path.dirname(__file__), "temp", "last_settings.json")
 
 
 def _ensure_dirs():
     os.makedirs(os.path.dirname(_LAST_FILES_JSON), exist_ok=True)
     os.makedirs(_LAST_FILES_DIR, exist_ok=True)
+
+
+def _save_settings(tab: str, settings: dict):
+    """Persist TTS/voice settings for a tab so they survive across runs."""
+    _ensure_dirs()
+    data = {}
+    if os.path.exists(_SETTINGS_JSON):
+        try:
+            with open(_SETTINGS_JSON, "r") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data[tab] = settings
+    with open(_SETTINGS_JSON, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_settings(tab: str) -> dict:
+    """Load previously saved TTS/voice settings for a tab."""
+    if not os.path.exists(_SETTINGS_JSON):
+        return {}
+    try:
+        with open(_SETTINGS_JSON, "r") as f:
+            data = json.load(f)
+        return data.get(tab, {})
+    except Exception:
+        return {}
 
 
 def _save_last_files(tab: str, files_dict: dict):
@@ -469,6 +497,20 @@ def run_pipeline(
         "avatar_image": avatar_image or "",
     })
 
+    # Save TTS settings so they persist across runs
+    _save_settings("avatar", {
+        "tts_engine": tts_engine,
+        "voice_stability": float(voice_stability),
+        "voice_similarity": float(voice_similarity),
+        "voice_style": float(voice_style),
+        "voice_speaker_boost": bool(voice_speaker_boost),
+        "coqui_temperature": float(coqui_temperature),
+        "coqui_repetition_penalty": float(coqui_repetition_penalty),
+        "coqui_top_p": float(coqui_top_p),
+        "coqui_bass_boost": float(coqui_bass_boost),
+        "coqui_high_cut": float(coqui_high_cut),
+    })
+
     progress(0.1, desc="Starting pipeline ...")
 
     try:
@@ -502,6 +544,10 @@ def run_pipeline(
 # Build the Gradio UI
 # ---------------------------------------------------------------------------
 
+# Load saved settings so UI controls remember values from last run
+_saved_avatar = _load_settings("avatar")
+_saved_pres = _load_settings("presentation")
+
 with gr.Blocks(
     title="AI Avatar Studio v2",
     theme=gr.themes.Soft(primary_hue="blue"),
@@ -532,7 +578,7 @@ with gr.Blocks(
                         "Coqui XTTS v2 (free, local voice cloning)",
                         "ElevenLabs (API, paid)",
                     ],
-                    value="Coqui XTTS v2 (free, local voice cloning)",
+                    value=_saved_avatar.get("tts_engine", "Coqui XTTS v2 (free, local voice cloning)"),
                     label="TTS Engine",
                 )
                 audio_only_toggle = gr.Checkbox(
@@ -701,46 +747,46 @@ with gr.Blocks(
                             value="My Avatar Voice",
                         )
                         voice_stability = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.20, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_avatar.get("voice_stability", 0.20), step=0.05,
                             label="Stability (lower = more expressive, higher = more consistent)",
                         )
                         voice_similarity = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.75, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_avatar.get("voice_similarity", 0.75), step=0.05,
                             label="Similarity (how close to the original voice)",
                         )
                         voice_style = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.65, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_avatar.get("voice_style", 0.65), step=0.05,
                             label="Style exaggeration (adds emotion and dynamics)",
                         )
                         voice_speaker_boost = gr.Checkbox(
                             label="Speaker boost (enhances clarity and presence)",
-                            value=True,
+                            value=_saved_avatar.get("voice_speaker_boost", True),
                         )
 
                     with gr.Accordion("Coqui XTTS Voice Settings", open=False):
                         gr.Markdown("*These settings only apply when using the Coqui XTTS v2 engine.*")
                         coqui_temperature = gr.Slider(
-                            minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                            minimum=0.1, maximum=1.0, value=_saved_avatar.get("coqui_temperature", 0.75), step=0.05,
                             label="Temperature (expressiveness)",
                             info="Lower = stable/monotone, higher = expressive/varied pitch",
                         )
                         coqui_repetition_penalty = gr.Slider(
-                            minimum=1.0, maximum=5.0, value=1.8, step=0.1,
+                            minimum=1.0, maximum=5.0, value=_saved_avatar.get("coqui_repetition_penalty", 1.8), step=0.1,
                             label="Repetition penalty",
                             info="Higher = fewer artifacts but less natural prosody",
                         )
                         coqui_top_p = gr.Slider(
-                            minimum=0.5, maximum=1.0, value=0.95, step=0.05,
+                            minimum=0.5, maximum=1.0, value=_saved_avatar.get("coqui_top_p", 0.95), step=0.05,
                             label="Top P (sampling breadth)",
                             info="Higher = more varied/natural, lower = more consistent",
                         )
                         coqui_bass_boost = gr.Slider(
-                            minimum=-3.0, maximum=6.0, value=1.0, step=0.5,
+                            minimum=-3.0, maximum=6.0, value=_saved_avatar.get("coqui_bass_boost", 1.0), step=0.5,
                             label="Bass boost (dB)",
                             info="Post-processing EQ below 250Hz. Adds warmth/chest resonance.",
                         )
                         coqui_high_cut = gr.Slider(
-                            minimum=-6.0, maximum=3.0, value=-0.5, step=0.5,
+                            minimum=-6.0, maximum=3.0, value=_saved_avatar.get("coqui_high_cut", -0.5), step=0.5,
                             label="High shelf (dB)",
                             info="Post-processing EQ above 4kHz. Negative = reduce brightness/thinness.",
                         )
@@ -944,7 +990,7 @@ with gr.Blocks(
                             "Coqui XTTS v2 (free, local voice cloning)",
                             "ElevenLabs (API, paid)",
                         ],
-                        value="Coqui XTTS v2 (free, local voice cloning)",
+                        value=_saved_pres.get("tts_engine", "Coqui XTTS v2 (free, local voice cloning)"),
                         label="TTS Engine",
                     )
 
@@ -983,46 +1029,46 @@ with gr.Blocks(
                             value="My Presentation Voice",
                         )
                         pres_stability = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.50, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_pres.get("stability", 0.50), step=0.05,
                             label="Stability (higher = cleaner, fewer filler words)",
                         )
                         pres_similarity = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.80, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_pres.get("similarity", 0.80), step=0.05,
                             label="Similarity",
                         )
                         pres_style = gr.Slider(
-                            minimum=0.0, maximum=1.0, value=0.20, step=0.05,
+                            minimum=0.0, maximum=1.0, value=_saved_pres.get("style", 0.20), step=0.05,
                             label="Style exaggeration (lower = fewer um's and uh's)",
                         )
                         pres_speaker_boost = gr.Checkbox(
                             label="Speaker boost",
-                            value=True,
+                            value=_saved_pres.get("speaker_boost", True),
                         )
 
                     with gr.Accordion("Coqui XTTS Voice Settings", open=False):
                         gr.Markdown("*These settings only apply when using the Coqui XTTS v2 engine.*")
                         pres_coqui_temperature = gr.Slider(
-                            minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                            minimum=0.1, maximum=1.0, value=_saved_pres.get("coqui_temperature", 0.75), step=0.05,
                             label="Temperature (expressiveness)",
                             info="Lower = stable/monotone, higher = expressive/varied pitch",
                         )
                         pres_coqui_repetition_penalty = gr.Slider(
-                            minimum=1.0, maximum=5.0, value=1.8, step=0.1,
+                            minimum=1.0, maximum=5.0, value=_saved_pres.get("coqui_repetition_penalty", 1.8), step=0.1,
                             label="Repetition penalty",
                             info="Higher = fewer artifacts but less natural prosody",
                         )
                         pres_coqui_top_p = gr.Slider(
-                            minimum=0.5, maximum=1.0, value=0.95, step=0.05,
+                            minimum=0.5, maximum=1.0, value=_saved_pres.get("coqui_top_p", 0.95), step=0.05,
                             label="Top P (sampling breadth)",
                             info="Higher = more varied/natural, lower = more consistent",
                         )
                         pres_coqui_bass_boost = gr.Slider(
-                            minimum=-3.0, maximum=6.0, value=1.0, step=0.5,
+                            minimum=-3.0, maximum=6.0, value=_saved_pres.get("coqui_bass_boost", 1.0), step=0.5,
                             label="Bass boost (dB)",
                             info="Post-processing EQ below 250Hz. Adds warmth/chest resonance.",
                         )
                         pres_coqui_high_cut = gr.Slider(
-                            minimum=-6.0, maximum=3.0, value=-0.5, step=0.5,
+                            minimum=-6.0, maximum=3.0, value=_saved_pres.get("coqui_high_cut", -0.5), step=0.5,
                             label="High shelf (dB)",
                             info="Post-processing EQ above 4kHz. Negative = reduce brightness/thinness.",
                         )
@@ -1224,6 +1270,20 @@ with gr.Blocks(
                     "source_video": source_video or "",
                     "pptx_file": pptx_file or "",
                     "script_text": script_text.strip() if script_text else "",
+                })
+
+                # Save TTS settings so they persist across runs
+                _save_settings("presentation", {
+                    "tts_engine": tts_engine,
+                    "stability": float(stability),
+                    "similarity": float(similarity),
+                    "style": float(style),
+                    "speaker_boost": bool(speaker_boost),
+                    "coqui_temperature": float(pres_coqui_temp),
+                    "coqui_repetition_penalty": float(pres_coqui_rep_pen),
+                    "coqui_top_p": float(pres_coqui_tp),
+                    "coqui_bass_boost": float(pres_coqui_bass),
+                    "coqui_high_cut": float(pres_coqui_high),
                 })
 
                 progress(0.05, desc="Setting up voice ...")
