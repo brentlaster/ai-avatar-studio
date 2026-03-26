@@ -87,21 +87,53 @@ def split_text_into_chunks(text: str, max_chars: int = 220) -> list:
     return chunks
 
 
-def trim_trailing_silence(frames: bytes, sample_width: int, threshold: int = 300, min_silence_samples: int = 2400) -> bytes:
+def trim_silence(frames: bytes, sample_width: int, threshold: int = 300,
+                 min_silence_samples: int = 2400, trim_leading: bool = True,
+                 trim_trailing: bool = True) -> bytes:
     """
-    Trim trailing silence/noise from raw PCM audio frames.
-    This removes the XTTS "tail artifacts" (warble, clicks) that appear
-    at the end of generated chunks.
-    """
-    if sample_width == 2:
-        # 16-bit PCM
-        n_samples = len(frames) // 2
-        samples = struct.unpack(f'<{n_samples}h', frames)
+    Trim leading and/or trailing silence from raw PCM audio frames.
+    Removes XTTS artifacts: leading dead air before speech starts,
+    and trailing warble/clicks after speech ends.
 
-        # Walk backward to find where actual audio ends
-        end = n_samples
+    Args:
+        frames: Raw PCM audio bytes
+        sample_width: Bytes per sample (2 for 16-bit)
+        threshold: Amplitude below which audio is considered silent
+        min_silence_samples: Consecutive silent samples needed to trigger trim
+        trim_leading: If True, trim silence from the start
+        trim_trailing: If True, trim silence from the end
+    """
+    if sample_width != 2:
+        return frames
+
+    n_samples = len(frames) // 2
+    if n_samples == 0:
+        return frames
+    samples = struct.unpack(f'<{n_samples}h', frames)
+
+    start = 0
+    end = n_samples
+
+    # Trim leading silence — walk forward to find where audio begins
+    if trim_leading:
         silent_count = 0
-        for i in range(n_samples - 1, -1, -1):
+        for i in range(n_samples):
+            if abs(samples[i]) < threshold:
+                silent_count += 1
+            else:
+                # Found audio. Trim everything before the silence run started,
+                # but keep a tiny 50ms lead-in so speech doesn't feel clipped.
+                # At 24kHz, 50ms = 1200 samples.
+                start = max(0, i - 1200)
+                break
+        else:
+            # Entire buffer is silent
+            return b'\x00' * 4  # Return minimal silence
+
+    # Trim trailing silence — walk backward
+    if trim_trailing:
+        silent_count = 0
+        for i in range(n_samples - 1, start - 1, -1):
             if abs(samples[i]) < threshold:
                 silent_count += 1
                 if silent_count >= min_silence_samples:
@@ -112,10 +144,17 @@ def trim_trailing_silence(frames: bytes, sample_width: int, threshold: int = 300
                 end = i + 1
                 break
 
-        trimmed = samples[:end]
-        return struct.pack(f'<{len(trimmed)}h', *trimmed)
-    else:
-        return frames
+    trimmed = samples[start:end]
+    if len(trimmed) == 0:
+        return b'\x00' * 4
+    return struct.pack(f'<{len(trimmed)}h', *trimmed)
+
+
+def trim_trailing_silence(frames: bytes, sample_width: int, threshold: int = 300,
+                          min_silence_samples: int = 2400) -> bytes:
+    """Legacy wrapper — trims both leading and trailing silence now."""
+    return trim_silence(frames, sample_width, threshold, min_silence_samples,
+                       trim_leading=True, trim_trailing=True)
 
 
 def post_process_audio(wav_path: str, sample_rate: int = 24000,
@@ -231,8 +270,10 @@ def post_process_audio(wav_path: str, sample_rate: int = 24000,
         noise_floor = np.min(mag, axis=1)
 
     # Subtract noise floor with over-subtraction factor and spectral floor
-    over_sub = 1.5  # Slightly aggressive noise removal
-    spectral_floor = 0.08  # Don't go below this fraction of original magnitude
+    # Reduced from 1.5→1.0 and raised floor from 0.08→0.15 to prevent
+    # wiping out quiet speech onsets (which caused audible dropouts)
+    over_sub = 1.0  # Gentle noise removal (was 1.5)
+    spectral_floor = 0.15  # Keep at least 15% of original magnitude (was 0.08)
 
     mag_clean = np.copy(mag)
     for i in range(n_frames_stft):

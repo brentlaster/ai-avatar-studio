@@ -479,14 +479,16 @@ def create_slide_video(
     image_path: str,
     audio_path: str,
     output_path: str,
-    lead_in: float = 0.5,
+    lead_in: float = 0.3,
 ) -> str:
     """
     Create a video segment: static slide image + audio narration.
 
-    A short silent lead-in (default 0.5s) is prepended so the slide
+    A short silent lead-in (default 0.3s) is prepended so the slide
     appears on screen *before* the narration begins.  This prevents the
     common perception that the slide is "late" relative to the voice.
+    Reduced from 0.5s because XTTS chunks already have natural
+    onset timing and leading silence is now trimmed.
     """
     # Get audio sample rate so the silence matches exactly
     probe_rate_cmd = [
