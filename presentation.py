@@ -506,18 +506,20 @@ def create_slide_video(
 
     # Build audio with lead-in silence prepended using ffmpeg's adelay filter.
     # adelay takes milliseconds; we also add a tiny 150ms tail of silence so the
-    # last word doesn't feel clipped.
+    # last word doesn't feel clipped. A 50ms fade-out at the very end eliminates
+    # stray XTTS speech artifacts at slide boundaries.
     lead_ms = int(lead_in * 1000)
     padded_audio_path = os.path.splitext(audio_path)[0] + "_padded.wav"
 
-    pad_cmd = [
+    # Step 1: create padded audio (lead-in silence + 150ms tail silence)
+    pad_cmd_nofade = [
         "ffmpeg", "-y",
         "-i", audio_path,
         "-af", f"adelay={lead_ms}|{lead_ms},apad=pad_dur=0.15",
         "-ar", str(sample_rate),
         padded_audio_path,
     ]
-    pad_result = subprocess.run(pad_cmd, capture_output=True, text=True, timeout=120)
+    pad_result = subprocess.run(pad_cmd_nofade, capture_output=True, text=True, timeout=120)
     if pad_result.returncode != 0:
         # Fallback: use original audio without padding
         print(f"      Warning: Could not add lead-in silence, using original audio")
@@ -536,18 +538,36 @@ def create_slide_video(
     except ValueError:
         duration = 10.0
 
-    # Create video: static image looped for padded audio duration + audio track
+    # Step 2: apply fade-out to the last 80ms to kill stray XTTS artifacts
+    fade_start = max(0.0, duration - 0.08)
+    faded_audio_path = os.path.splitext(audio_path)[0] + "_faded.wav"
+    fade_cmd = [
+        "ffmpeg", "-y",
+        "-i", padded_audio_path,
+        "-af", f"afade=t=out:st={fade_start:.3f}:d=0.08",
+        "-ar", str(sample_rate),
+        faded_audio_path,
+    ]
+    fade_result = subprocess.run(fade_cmd, capture_output=True, text=True, timeout=120)
+    if fade_result.returncode == 0:
+        final_audio = faded_audio_path
+    else:
+        final_audio = padded_audio_path
+
+    # Create video: static image looped for EXACTLY the audio duration + audio track.
+    # Using explicit -t duration instead of -shortest prevents A/V duration mismatch
+    # that causes cumulative timing drift when segments are concatenated.
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1",
         "-i", image_path,
-        "-i", padded_audio_path,
+        "-i", final_audio,
         "-c:v", "libx264",
         "-tune", "stillimage",
         "-c:a", "aac", "-b:a", "192k",
         "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
         "-pix_fmt", "yuv420p",
-        "-shortest",
+        "-t", f"{duration:.3f}",
         "-movflags", "+faststart",
         output_path,
     ]
@@ -556,18 +576,26 @@ def create_slide_video(
     if result.returncode != 0:
         raise RuntimeError(f"Slide video creation failed:\n{result.stderr}")
 
-    # Clean up padded audio
-    if padded_audio_path != audio_path:
-        try:
-            os.remove(padded_audio_path)
-        except OSError:
-            pass
+    # Clean up temp audio files
+    for tmp in [padded_audio_path, faded_audio_path]:
+        if tmp != audio_path:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     return output_path
 
 
 def concatenate_videos(video_paths: list[str], output_path: str) -> str:
-    """Concatenate multiple video segments into one final presentation video."""
+    """Concatenate multiple video segments into one final presentation video.
+
+    Always re-encodes during concatenation to guarantee proper A/V timestamp
+    alignment.  The old ``-c copy`` approach was faster but caused cumulative
+    timing drift: each segment's audio (AAC, with priming samples) and video
+    (25 fps still-image loop) had slightly different durations, and the small
+    errors compounded over many slides—producing visible slide-lag.
+    """
     if len(video_paths) == 1:
         shutil.copy2(video_paths[0], output_path)
         return output_path
@@ -579,31 +607,24 @@ def concatenate_videos(video_paths: list[str], output_path: str) -> str:
             escaped = path.replace("'", "'\\''")
             f.write(f"file '{escaped}'\n")
 
-    # Use concat demuxer — all segments have same resolution/codec
+    # Re-encode during concat to force correct timestamp alignment.
+    # Uses CRF 20 (visually lossless for still-image slides) and fast preset
+    # since the video is just static slides—encoding is quick.
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", list_path,
-        "-c", "copy",
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+        "-tune", "stillimage",
+        "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         output_path,
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        # Fall back to re-encoding if copy fails
-        cmd_reencode = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", list_path,
-            "-c:v", "libx264", "-crf", "23",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-        result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
-            raise RuntimeError(f"Video concatenation failed:\n{result.stderr}")
+        raise RuntimeError(f"Video concatenation failed:\n{result.stderr}")
 
     return output_path
 
