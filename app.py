@@ -106,13 +106,21 @@ def _get_last_files_summary(tab: str) -> str:
         return "No previously used files found."
     parts = []
     for key, path in files.items():
-        name = os.path.basename(path)
+        # Skip non-file entries (e.g. script_text stores raw text, not a path)
+        if not path or "\n" in path or len(path) > 500:
+            continue
+        name = os.path.basename(path) if os.sep in path or "/" in path else path
         # Remove the tab_key_ prefix from displayed name
         display_name = name
         prefix = f"{tab}_{key}_"
         if display_name.startswith(prefix):
             display_name = display_name[len(prefix):]
-        parts.append(f"**{key}**: {display_name}")
+        # Truncate long filenames to prevent UI overflow
+        if len(display_name) > 30:
+            display_name = display_name[:27] + "..."
+        parts.append(f"**{key}** {display_name}")
+    if not parts:
+        return "No previously used files found."
     return "Last used: " + " · ".join(parts)
 
 
@@ -553,8 +561,10 @@ with gr.Blocks(
                 )
 
             with gr.Row():
-                use_last_btn_avatar = gr.Button("📂 Use Last Files", size="sm")
-                last_files_info_avatar = gr.Markdown(_get_last_files_summary("avatar"))
+                with gr.Column(scale=0, min_width=160):
+                    use_last_btn_avatar = gr.Button("📂 Use Last Files", size="sm")
+                with gr.Column(scale=1):
+                    last_files_info_avatar = gr.Markdown(_get_last_files_summary("avatar"))
 
             gr.Markdown("---")
 
@@ -891,8 +901,10 @@ with gr.Blocks(
             )
 
             with gr.Row():
-                use_last_btn_pres = gr.Button("📂 Use Last Files", size="sm")
-                last_files_info_pres = gr.Markdown(_get_last_files_summary("presentation"))
+                with gr.Column(scale=0, min_width=160):
+                    use_last_btn_pres = gr.Button("📂 Use Last Files", size="sm")
+                with gr.Column(scale=1):
+                    last_files_info_pres = gr.Markdown(_get_last_files_summary("presentation"))
 
             with gr.Row():
                 with gr.Column(scale=1):
