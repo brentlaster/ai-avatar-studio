@@ -1098,8 +1098,9 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
     total_min = int(total_duration // 60)
     total_sec = int(total_duration % 60)
 
-    # Build segment HTML blocks
+    # Build segment HTML blocks and collect notes for the JS notes data array
     seg_blocks = ""
+    notes_js_entries = []
     for i, t in enumerate(timeline):
         escaped_text = html_mod.escape(t["text"]).replace("\n", "<br>")
         start_min = int(t["start"] // 60)
@@ -1113,6 +1114,9 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
                 f'<span class="seg-notes-label">Slide Notes</span>'
                 f'{escaped_notes}</div>'
             )
+        # Escape notes for JS string (handle quotes and newlines)
+        js_notes = html_mod.escape(notes_text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "<br>")
+        notes_js_entries.append(f'{{start:{t["start"]},end:{t["end"]},slide:{t["slide"]},notes:"{js_notes}"}}')
         seg_blocks += f'''
         <div class="seg" id="seg-{i}" data-start="{t['start']}" data-end="{t['end']}">
             <div class="seg-header">
@@ -1122,6 +1126,19 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
             <div class="seg-text">{escaped_text}</div>
             {notes_html}
         </div>'''
+    notes_js_array = ",".join(notes_js_entries)
+    has_any_notes = any(t.get("notes", "") for t in timeline)
+
+    # Pre-build the notes bar HTML (avoids nested quotes in f-string)
+    if has_any_notes:
+        notes_bar_html = (
+            '<div class="notes-bar empty" id="notesBar">'
+            '<div class="notes-bar-label">Slide Notes</div>'
+            '<div class="notes-bar-text placeholder" id="notesText">'
+            'Notes will appear here as the presentation plays</div></div>'
+        )
+    else:
+        notes_bar_html = ""
 
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -1135,7 +1152,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 .container {{ display: flex; height: 100vh; }}
 .video-panel {{ flex: 1; display: flex; flex-direction: column; align-items: center;
                justify-content: center; padding: 20px; background: #16213e; }}
-.video-panel video {{ max-width: 100%; max-height: 80vh; border-radius: 8px;
+.video-panel video {{ max-width: 100%; max-height: 70vh; border-radius: 8px;
                       box-shadow: 0 4px 20px rgba(0,0,0,0.5); }}
 .video-panel h2 {{ color: #a0c4ff; margin-bottom: 12px; font-size: 14px;
                    letter-spacing: 1px; text-transform: uppercase; }}
@@ -1167,6 +1184,15 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 .seg-notes-label {{ display: block; font-size: 11px; font-weight: 600;
                     text-transform: uppercase; letter-spacing: 0.5px;
                     color: #fbbf24; margin-bottom: 4px; }}
+.notes-bar {{ width: 100%; margin-top: 14px; padding: 12px 16px;
+             background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.25);
+             border-radius: 8px; min-height: 48px; max-height: 120px; overflow-y: auto;
+             transition: opacity 0.3s ease; }}
+.notes-bar.empty {{ opacity: 0.4; }}
+.notes-bar-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase;
+                    letter-spacing: 0.5px; color: #fbbf24; margin-bottom: 4px; }}
+.notes-bar-text {{ font-size: 13px; line-height: 1.5; color: #fde68a; }}
+.notes-bar-text.placeholder {{ color: #7a8ba8; font-style: italic; }}
 .script-panel::-webkit-scrollbar {{ width: 6px; }}
 .script-panel::-webkit-scrollbar-track {{ background: transparent; }}
 .script-panel::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
@@ -1188,6 +1214,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
             <button class="speed-btn" data-speed="1.5">1.5x</button>
             <button class="speed-btn" data-speed="2">2x</button>
         </div>
+        {notes_bar_html}
     </div>
     <div class="script-panel" id="scriptPanel">
         <h2>Speaker Script</h2>
@@ -1198,6 +1225,9 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 const vid = document.getElementById("vid");
 const segs = document.querySelectorAll(".seg");
 const panel = document.getElementById("scriptPanel");
+const notesBar = document.getElementById("notesBar");
+const notesText = document.getElementById("notesText");
+const notesData = [{notes_js_array}];
 
 // Speed control
 document.querySelectorAll(".speed-btn").forEach(btn => {{
@@ -1216,6 +1246,7 @@ segs.forEach(s => {{
     }});
 }});
 
+let lastNotesSlide = -1;
 vid.addEventListener("timeupdate", () => {{
     const t = vid.currentTime;
     let activeEl = null;
@@ -1235,6 +1266,23 @@ vid.addEventListener("timeupdate", () => {{
         const offset = elRect.top - panelRect.top - panelRect.height / 3;
         if (Math.abs(offset) > 20) {{
             panel.scrollBy({{ top: offset, behavior: "smooth" }});
+        }}
+    }}
+    // Update notes bar below video
+    if (notesBar && notesText) {{
+        const nd = notesData.find(n => t >= n.start && t < n.end);
+        const slideNum = nd ? nd.slide : -1;
+        if (slideNum !== lastNotesSlide) {{
+            lastNotesSlide = slideNum;
+            if (nd && nd.notes) {{
+                notesBar.classList.remove("empty");
+                notesText.classList.remove("placeholder");
+                notesText.innerHTML = "<strong>Slide " + nd.slide + ":</strong> " + nd.notes;
+            }} else {{
+                notesBar.classList.add("empty");
+                notesText.classList.add("placeholder");
+                notesText.innerHTML = nd ? "No notes for slide " + nd.slide : "Notes will appear here as the presentation plays";
+            }}
         }}
     }}
 }});
