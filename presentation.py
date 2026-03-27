@@ -178,13 +178,14 @@ def parse_slide_script(script_text: str) -> list[SlideSegment]:
     Text before the first marker is ignored.
     Slides whose body is just "[Skip]" are omitted.
     """
-    # Try bracketed format first:  [SLIDE N ...]
-    pattern_bracket = r'^\s*#*\s*\[(?:[Ss][Ll][Ii][Dd][Ee])\s+(\d+)[^\]]*\]'
+    # Try bracketed format first:  [SLIDE N ...]  or  [SLIDE 11b ...]
+    # Capture the number AND an optional letter suffix (e.g. "11b")
+    pattern_bracket = r'^\s*#*\s*\[(?:[Ss][Ll][Ii][Dd][Ee])\s+(\d+)([a-zA-Z]?)[^\]]*\]'
     markers = list(re.finditer(pattern_bracket, script_text, re.MULTILINE))
 
     # If no bracketed markers found, try heading format:  ## SLIDE N: ...
     if not markers:
-        pattern_heading = r'^\s*#{1,6}\s+[Ss][Ll][Ii][Dd][Ee]\s+(\d+)\b[^\n]*'
+        pattern_heading = r'^\s*#{1,6}\s+[Ss][Ll][Ii][Dd][Ee]\s+(\d+)([a-zA-Z]?)\b[^\n]*'
         markers = list(re.finditer(pattern_heading, script_text, re.MULTILINE))
 
     if not markers:
@@ -193,6 +194,7 @@ def parse_slide_script(script_text: str) -> list[SlideSegment]:
             "Accepted formats:\n"
             "  [SLIDE 1]\n"
             "  [SLIDE 3 — \"Title Here\"]\n"
+            "  [SLIDE 11b — Sub-slide]\n"
             "  ## SLIDE 3: Title Here\n"
         )
 
@@ -214,9 +216,11 @@ def parse_slide_script(script_text: str) -> list[SlideSegment]:
     else:
         script_boundary = len(script_text)
 
-    segments = []
+    # First pass: collect raw slide entries with their script numbers and suffixes
+    raw_entries = []
     for i, match in enumerate(markers):
         slide_num = int(match.group(1))
+        suffix = match.group(2) if match.lastindex >= 2 else ""  # e.g. "b" from "11b"
 
         # Text starts after the full marker line
         text_start = match.end()
@@ -230,15 +234,30 @@ def parse_slide_script(script_text: str) -> list[SlideSegment]:
         raw_text = script_text[text_start:text_end].strip()
 
         # Skip slides explicitly marked [Skip]
-        if re.match(r'^\s*\[?\s*[Ss]kip\s*\]?\s*$', raw_text):
-            print(f"      [parse] Slide {slide_num}: [Skip] — omitting")
+        if re.match(r'^\s*\*?\[?\s*[Ss]kip\b.*$', raw_text):
+            print(f"      [parse] Slide {slide_num}{suffix}: [Skip] — omitting")
             continue
 
-        # Clean the narration text: strip markdown, handle stage directions
-        clean_text = clean_narration_text(raw_text)
+        raw_entries.append((slide_num, suffix, raw_text))
 
+    # Second pass: compute physical deck slide numbers.
+    # Sub-slides like "11b" insert extra slides in the deck after slide 11.
+    # Each sub-slide shifts all subsequent physical positions by +1.
+    # Example: script 10, 11, 11b, 12 → deck 10, 11, 12, 13
+    segments = []
+    offset = 0  # cumulative offset from sub-slides
+    for slide_num, suffix, raw_text in raw_entries:
+        if suffix:
+            # Sub-slide: use previous slide's number + 1 in the deck
+            offset += 1
+            physical_num = slide_num + offset
+            print(f"      [parse] Slide {slide_num}{suffix} → deck slide {physical_num} (sub-slide)")
+        else:
+            physical_num = slide_num + offset
+
+        clean_text = clean_narration_text(raw_text)
         if clean_text:
-            segments.append(SlideSegment(slide_number=slide_num, text=clean_text))
+            segments.append(SlideSegment(slide_number=physical_num, text=clean_text))
 
     return segments
 
@@ -727,8 +746,10 @@ def generate_presentation(
         # --- BATCH MODE: load Coqui model once for all slides ---
         print(f"      Using batch mode (model loads once for all {len(segments)} slides)")
         batch_items = []
-        for seg in segments:
-            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}.wav")
+        # Use sequential index for file names to avoid collisions when
+        # sub-slides (e.g. 11b) produce duplicate slide numbers.
+        for idx, seg in enumerate(segments):
+            audio_path = os.path.join(segments_dir, f"narration_seg{idx:03d}_slide{seg.slide_number:03d}.wav")
             batch_items.append({
                 "text": seg.text,
                 "output_path": audio_path,
@@ -741,8 +762,8 @@ def generate_presentation(
         _generate_speech_coqui_batch(batch_items, config)
 
         # Map outputs back to segments
-        for seg in segments:
-            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}.wav")
+        for idx, seg in enumerate(segments):
+            audio_path = os.path.join(segments_dir, f"narration_seg{idx:03d}_slide{seg.slide_number:03d}.wav")
             if os.path.exists(audio_path):
                 seg.audio_path = audio_path
             else:
@@ -757,7 +778,7 @@ def generate_presentation(
             preview_text = seg.text[:200].replace('\n', ' ↵ ')
             print(f"      Narration: \"{preview_text}{'...' if len(seg.text) > 200 else ''}\"")
             audio_ext = ".wav" if config.tts_engine == "coqui_xtts" else ".mp3"
-            audio_path = os.path.join(segments_dir, f"narration_slide{seg.slide_number:03d}{audio_ext}")
+            audio_path = os.path.join(segments_dir, f"narration_seg{i:03d}_slide{seg.slide_number:03d}{audio_ext}")
             generate_speech(
                 script_text=seg.text,
                 voice_id=voice_id,
@@ -783,12 +804,13 @@ def generate_presentation(
     print(f"\n[4/4] Assembling presentation video ...")
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def _make_slide_video(seg):
+    def _make_slide_video(idx_seg):
         """Worker function for parallel video assembly."""
-        seg_video_path = os.path.join(segments_dir, f"segment_slide{seg.slide_number:03d}.mp4")
+        idx, seg = idx_seg
+        seg_video_path = os.path.join(segments_dir, f"segment_seg{idx:03d}_slide{seg.slide_number:03d}.mp4")
         create_slide_video(seg.image_path, seg.audio_path, seg_video_path)
         seg.video_path = seg_video_path
-        return seg.slide_number, seg_video_path
+        return idx, seg_video_path
 
     video_segments = []
     # Use up to 4 parallel ffmpeg workers (CPU-bound, not memory-heavy)
@@ -797,19 +819,19 @@ def generate_presentation(
         print(f"      Creating {len(segments)} slide videos ({max_workers} parallel workers) ...")
         video_map = {}
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_make_slide_video, seg): seg for seg in segments}
+            futures = {pool.submit(_make_slide_video, (idx, seg)): idx for idx, seg in enumerate(segments)}
             for future in as_completed(futures):
-                slide_num, video_path = future.result()
-                video_map[slide_num] = video_path
-                print(f"      Slide {slide_num} video ready")
+                idx, video_path = future.result()
+                video_map[idx] = video_path
+                print(f"      Segment {idx} (slide {segments[idx].slide_number}) video ready")
 
-        # Maintain original order
-        for seg in segments:
-            video_segments.append(video_map[seg.slide_number])
+        # Maintain original order using sequential index
+        for idx in range(len(segments)):
+            video_segments.append(video_map[idx])
     else:
-        for seg in segments:
+        for idx, seg in enumerate(segments):
             print(f"      Creating video for slide {seg.slide_number} ...")
-            seg_video_path = os.path.join(segments_dir, f"segment_slide{seg.slide_number:03d}.mp4")
+            seg_video_path = os.path.join(segments_dir, f"segment_seg{idx:03d}_slide{seg.slide_number:03d}.mp4")
             create_slide_video(seg.image_path, seg.audio_path, seg_video_path)
             seg.video_path = seg_video_path
             video_segments.append(seg_video_path)
