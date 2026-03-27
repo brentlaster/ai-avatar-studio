@@ -656,6 +656,28 @@ def concatenate_videos(video_paths: list[str], output_path: str) -> str:
     return output_path
 
 
+def _extract_slide_notes(pptx_path: str) -> dict[int, str]:
+    """
+    Extract speaker notes from each slide in a .pptx file.
+    Returns a dict mapping slide number (1-based) to notes text.
+    Slides without notes return an empty string.
+    """
+    notes_map: dict[int, str] = {}
+    try:
+        from pptx import Presentation as PptxPresentation
+        prs = PptxPresentation(pptx_path)
+        for i, slide in enumerate(prs.slides, start=1):
+            if slide.has_notes_slide:
+                notes_text = slide.notes_slide.notes_text_frame.text.strip()
+                if notes_text:
+                    notes_map[i] = notes_text
+        if notes_map:
+            print(f"      Extracted speaker notes from {len(notes_map)} slides")
+    except Exception as e:
+        print(f"      Warning: Could not extract slide notes: {e}")
+    return notes_map
+
+
 def generate_presentation(
     pptx_path: str,
     script_text: str,
@@ -864,15 +886,20 @@ def generate_presentation(
     seconds = int(total_duration % 60)
     print(f"\n      Total presentation duration: {minutes}m {seconds}s")
 
+    # Extract slide notes from the PPTX for display in the viewer
+    slide_notes = _extract_slide_notes(pptx_path)
+
     # Build timeline data for the in-app script viewer
     timeline = []
     cumulative = 0.0
     for i, seg in enumerate(segments):
+        notes = slide_notes.get(seg.slide_number, "")
         timeline.append({
             "slide": seg.slide_number,
             "start": round(cumulative, 2),
             "end": round(cumulative + seg_durations[i], 2),
             "text": seg.text,
+            "notes": notes,
         })
         cumulative += seg_durations[i]
 
@@ -926,6 +953,16 @@ def build_script_viewer_html(timeline: list) -> str:
         end_sec = int(t["end"] % 60)
         duration = t["end"] - t["start"]
 
+        notes_html = ""
+        notes_text = t.get("notes", "")
+        if notes_text:
+            escaped_notes = html_mod.escape(notes_text).replace("\n", "<br>")
+            notes_html = (
+                f'<div class="sv-notes">'
+                f'<span class="sv-notes-label">Slide Notes</span>'
+                f'{escaped_notes}</div>'
+            )
+
         seg_blocks += f'''
         <div class="sv-seg" id="sv-seg-{i}">
             <div class="sv-header">
@@ -933,6 +970,7 @@ def build_script_viewer_html(timeline: list) -> str:
                 <span class="sv-time">{start_min}:{start_sec:02d} — {end_min}:{end_sec:02d} ({duration:.0f}s)</span>
             </div>
             <div class="sv-text">{escaped_text}</div>
+            {notes_html}
         </div>
 '''
 
@@ -1000,6 +1038,25 @@ def build_script_viewer_html(timeline: list) -> str:
     line-height: 1.65;
     color: #1e293b;
 }}
+.sv-notes {{
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: #fefce8;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #713f12;
+}}
+.sv-notes-label {{
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #a16207;
+    margin-bottom: 4px;
+}}
 .sv-scroll::-webkit-scrollbar {{
     width: 6px;
 }}
@@ -1047,6 +1104,15 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
         escaped_text = html_mod.escape(t["text"]).replace("\n", "<br>")
         start_min = int(t["start"] // 60)
         start_sec = int(t["start"] % 60)
+        notes_html = ""
+        notes_text = t.get("notes", "")
+        if notes_text:
+            escaped_notes = html_mod.escape(notes_text).replace("\n", "<br>")
+            notes_html = (
+                f'<div class="seg-notes">'
+                f'<span class="seg-notes-label">Slide Notes</span>'
+                f'{escaped_notes}</div>'
+            )
         seg_blocks += f'''
         <div class="seg" id="seg-{i}" data-start="{t['start']}" data-end="{t['end']}">
             <div class="seg-header">
@@ -1054,6 +1120,7 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
                 <span class="seg-time">{start_min}:{start_sec:02d}</span>
             </div>
             <div class="seg-text">{escaped_text}</div>
+            {notes_html}
         </div>'''
 
     html_content = f'''<!DOCTYPE html>
@@ -1094,6 +1161,12 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 .seg-time {{ font-weight: 400; color: #7a8ba8; font-size: 12px; }}
 .seg-text {{ font-size: 14px; line-height: 1.6; color: #c8d6e5; }}
 .seg.active .seg-text {{ color: #f0f0f0; }}
+.seg-notes {{ margin-top: 10px; padding: 10px 12px; background: rgba(251,191,36,0.12);
+              border: 1px solid rgba(251,191,36,0.3); border-radius: 6px;
+              font-size: 13px; line-height: 1.55; color: #fde68a; }}
+.seg-notes-label {{ display: block; font-size: 11px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.5px;
+                    color: #fbbf24; margin-bottom: 4px; }}
 .script-panel::-webkit-scrollbar {{ width: 6px; }}
 .script-panel::-webkit-scrollbar-track {{ background: transparent; }}
 .script-panel::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}

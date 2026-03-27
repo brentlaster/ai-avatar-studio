@@ -1179,7 +1179,10 @@ with gr.Blocks(
   <button onclick="document.querySelectorAll('#pres-video video').forEach(v=>v.playbackRate=2);this.parentNode.querySelectorAll('button').forEach(b=>b.style.background='#374151');this.style.background='#2563eb'" style="background:#374151;color:#d1d5db;border:1px solid #4b5563;padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px">2x</button>
 </div>
 """)
-                    pres_viewer_link = gr.HTML(value="")
+                    pres_viewer_link = gr.File(
+                        label="Presentation Viewer (HTML)",
+                        visible=False,
+                    )
                     pres_script_viewer = gr.HTML(value="", label="Script Viewer")
 
                     gr.Markdown(
@@ -1340,31 +1343,15 @@ with gr.Blocks(
                         except Exception as e:
                             print(f"Warning: Could not build script viewer: {e}")
 
-                    # Build viewer link — serve via Gradio's /file= proxy
-                    # and also show the local file path for direct browser access.
+                    # Return the standalone viewer HTML file for Gradio's File component
                     standalone_path = os.path.splitext(output_path)[0] + "_viewer.html"
-                    viewer_link_html = ""
+                    viewer_file = None
                     if os.path.exists(standalone_path):
-                        fname = os.path.basename(standalone_path)
-                        viewer_link_html = (
-                            f'<div style="padding:12px 16px;background:#f0f9ff;border:1px solid #bae6fd;'
-                            f'border-radius:8px;margin:8px 0;">'
-                            f'<div style="font-weight:600;color:#0369a1;margin-bottom:6px;">'
-                            f'Presentation Viewer</div>'
-                            f'<a href="/file={standalone_path}" target="_blank" download="{fname}" '
-                            f'style="display:inline-block;background:#2563eb;color:#fff;'
-                            f'padding:8px 16px;border-radius:6px;text-decoration:none;'
-                            f'font-weight:500;font-size:13px;margin-bottom:8px;">'
-                            f'Download Viewer HTML</a>'
-                            f'<div style="font-size:12px;color:#475569;margin-top:8px;">'
-                            f'Or open directly in your browser:<br>'
-                            f'<code style="background:#e2e8f0;padding:4px 8px;border-radius:4px;'
-                            f'font-size:11px;word-break:break-all;display:inline-block;margin-top:4px;">'
-                            f'file://{standalone_path}</code></div>'
-                            f'</div>'
-                        )
+                        viewer_file = gr.update(value=standalone_path, visible=True)
+                    else:
+                        viewer_file = gr.update(value=None, visible=False)
 
-                    return output_path, viewer_link_html, viewer_html
+                    return output_path, viewer_file, viewer_html
 
                 except ValueError as e:
                     raise gr.Error(str(e))
