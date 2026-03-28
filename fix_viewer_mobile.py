@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Fix existing presentation viewer HTML files for mobile playback.
+Fix existing presentation viewer HTML files for desktop browsers, and
+generate a notes-only page for mobile use.
 
-Mobile Safari and some Android browsers don't support video playback from
-data: URIs. This script converts existing viewer HTML files to use Blob URLs
-instead, and adds responsive CSS + viewport meta for mobile layout.
+For desktop: patches viewer HTML to use Blob URLs (instead of data: URIs),
+adds responsive CSS, and viewport meta.
 
-It also generates a *_mobile/ folder next to each viewer containing a tiny
-HTML file + separate MP4 — suitable for Dropbox, iCloud, Google Drive, etc.
-where the self-contained HTML is too large for mobile Safari to load.
+For mobile: generates a lightweight *_notes.html with just the speaker
+script and slide notes (no video). On mobile, watch the MP4 natively in
+Dropbox/iCloud and reference the notes page alongside it.
 
 Usage:
     python fix_viewer_mobile.py viewer1.html viewer2.html ...
@@ -242,8 +242,11 @@ def _extract_segments(html: str) -> list:
     return segments
 
 
-def generate_mobile_version(filepath: str) -> bool:
+def _unused_generate_mobile_version(filepath: str) -> bool:  # noqa: kept for reference
     """
+    [DEPRECATED] — Mobile Safari / Dropbox WebView cannot reliably play
+    embedded video regardless of size. Use generate_notes_page() instead.
+
     Create a mobile-friendly self-contained viewer from an existing viewer HTML.
 
     Decodes the embedded base64 video to a temp MP4, re-encodes it at lower
@@ -620,15 +623,66 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
     return True
 
 
+def cleanup_old_mobile_files(filepath: str) -> int:
+    """
+    Remove leftover files from previous mobile viewer attempts.
+    Cleans up: *_mobile.html, *_backup.html, *_mobile.mp4, *_mobile/ folders.
+    Returns the number of items removed.
+    """
+    path = Path(filepath)
+    stem = path.stem.replace("_viewer", "").replace("_backup", "")
+    parent = path.parent
+
+    removed = 0
+    # Patterns to clean up (relative to the same directory as the viewer)
+    candidates = [
+        parent / f"{stem}_mobile.html",
+        parent / f"{stem}_mobile.mp4",
+        parent / f"{stem}_backup.html",
+    ]
+    # Also check with the full viewer stem (e.g. foo_viewer_mobile.html)
+    viewer_stem = path.stem
+    candidates += [
+        parent / f"{viewer_stem}_mobile.html",
+        parent / f"{viewer_stem}_mobile.mp4",
+        parent / f"{viewer_stem}_backup.html",
+    ]
+    # Deduplicate
+    candidates = list(dict.fromkeys(candidates))
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            candidate.unlink()
+            print(f"  CLEANUP  Removed {candidate.name}")
+            removed += 1
+
+    # Remove *_mobile/ directories
+    mobile_dirs = [
+        parent / f"{stem}_mobile",
+        parent / f"{viewer_stem}_mobile",
+    ]
+    mobile_dirs = list(dict.fromkeys(mobile_dirs))
+    for d in mobile_dirs:
+        if d.exists() and d.is_dir():
+            shutil.rmtree(d)
+            print(f"  CLEANUP  Removed {d.name}/")
+            removed += 1
+
+    return removed
+
+
 def main():
     if len(sys.argv) < 2 or (len(sys.argv) == 2 and sys.argv[1] in ("--force", "--help")):
         print("Usage: python fix_viewer_mobile.py [--force] <viewer.html> [viewer2.html ...]")
         print("       python fix_viewer_mobile.py [--force] outputs/*_viewer.html")
         print()
         print("For each viewer HTML, this script:")
-        print("  1. Patches it for desktop mobile compatibility (Blob URL, responsive CSS)")
-        print("  2. Creates a *_mobile.html with re-encoded smaller video for phones")
-        print("  3. Creates a *_notes.html with script + notes only (no video)")
+        print("  1. Patches it for desktop browsers (Blob URL, responsive CSS)")
+        print("  2. Creates a *_notes.html with script + slide notes (no video)")
+        print("  3. Removes leftover files from old mobile attempts")
+        print("     (*_mobile.html, *_backup.html, *_mobile.mp4, *_mobile/ folders)")
+        print()
+        print("On mobile, watch the MP4 in Dropbox/iCloud and use the notes page alongside it.")
         print()
         print("Options:")
         print("  --force   Re-patch files that were already patched")
@@ -638,19 +692,16 @@ def main():
     files = [f for f in sys.argv[1:] if f != "--force"]
 
     patched = 0
-    mobile = 0
     notes = 0
+    cleaned = 0
     for f in files:
         if fix_viewer_html(f, force=force):
             patched += 1
-        if generate_mobile_version(f):
-            mobile += 1
         if generate_notes_page(f):
             notes += 1
+        cleaned += cleanup_old_mobile_files(f)
 
-    print(f"\nDone: {patched} patched, {mobile} mobile viewer(s), {notes} notes page(s).")
-    if patched:
-        print("Originals backed up as *_backup.html (first run only)")
+    print(f"\nDone: {patched} patched, {notes} notes page(s) created, {cleaned} old file(s) removed.")
 
 
 if __name__ == "__main__":
