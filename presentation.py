@@ -921,13 +921,21 @@ def generate_presentation(
     except Exception as e:
         print(f"      Warning: Could not generate standalone viewer: {e}")
 
-    # Generate mobile-friendly viewer (small HTML + separate MP4)
+    # Generate mobile-friendly self-contained viewer (re-encoded smaller video)
     try:
         mobile_path = generate_mobile_viewer(output_path, timeline)
         if mobile_path:
             print(f"      Mobile viewer:     {mobile_path}")
     except Exception as e:
         print(f"      Warning: Could not generate mobile viewer: {e}")
+
+    # Generate standalone notes page (no video, just script + notes)
+    try:
+        notes_path = generate_notes_page(output_path, timeline)
+        if notes_path:
+            print(f"      Notes page:        {notes_path}")
+    except Exception as e:
+        print(f"      Warning: Could not generate notes page: {e}")
 
     print(f"      Presentation saved to {output_path}")
     print("=" * 60)
@@ -1344,35 +1352,47 @@ vid.addEventListener("timeupdate", () => {{
 
 def generate_mobile_viewer(video_path: str, timeline: list) -> str:
     """
-    Generate a mobile-friendly HTML viewer that references the video as a
-    separate file instead of embedding it as base64.  This keeps the HTML
-    tiny (<50 KB) so mobile Safari can load it, and the video streams
-    normally with playsinline support.
+    Generate a mobile-friendly self-contained HTML viewer.
 
-    Both the HTML and a copy of the MP4 are placed in a *_mobile/ folder
-    next to the original video so they can be uploaded together (e.g. to
-    Dropbox, Google Drive, iCloud, etc.).
+    The video is re-encoded at a lower bitrate via ffmpeg so the total
+    HTML file stays under ~4-5 MB — small enough for mobile Safari to load
+    from Dropbox, iCloud, email attachments, etc.
 
     Returns the path to the generated HTML file.
     """
     import html as html_mod
+    import base64
 
     if not timeline or not os.path.exists(video_path):
         return ""
 
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    mobile_dir = os.path.splitext(video_path)[0] + "_mobile"
-    os.makedirs(mobile_dir, exist_ok=True)
+    viewer_path = os.path.splitext(video_path)[0] + "_mobile.html"
 
-    # Copy the MP4 into the mobile folder
-    mp4_filename = os.path.basename(video_path)
-    mobile_mp4 = os.path.join(mobile_dir, mp4_filename)
-    if not os.path.exists(mobile_mp4) or (
-        os.path.getsize(mobile_mp4) != os.path.getsize(video_path)
-    ):
-        shutil.copy2(video_path, mobile_mp4)
+    # Re-encode video at lower bitrate for mobile
+    mobile_mp4 = os.path.splitext(video_path)[0] + "_mobile.mp4"
+    print("      Re-encoding video for mobile (lower bitrate) ...")
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-c:v", "libx264", "-crf", "32", "-preset", "fast",
+        "-tune", "stillimage",
+        "-vf", "scale='min(960,iw)':-2",  # cap width at 960px
+        "-c:a", "aac", "-b:a", "96k", "-ac", "1",  # mono audio, lower bitrate
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        mobile_mp4,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        print(f"      Warning: Mobile re-encode failed, falling back to original video")
+        mobile_mp4 = video_path
 
-    viewer_html_path = os.path.join(mobile_dir, f"{video_name}_viewer.html")
+    mp4_size = os.path.getsize(mobile_mp4) / (1024 * 1024)
+    print(f"      Mobile video: {mp4_size:.1f} MB")
+
+    # Base64-encode the mobile video
+    print("      Encoding mobile video for self-contained HTML ...")
+    with open(mobile_mp4, "rb") as vf:
+        video_b64 = base64.b64encode(vf.read()).decode("ascii")
 
     total_duration = timeline[-1]["end"] if timeline else 0
     total_min = int(total_duration // 60)
@@ -1495,9 +1515,8 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 <div class="container">
     <div class="video-panel">
         <h2>Presentation</h2>
-        <video id="vid" controls playsinline webkit-playsinline>
-            <source src="{mp4_filename}" type="video/mp4">
-        </video>
+        <video id="vid" controls playsinline webkit-playsinline></video>
+        <div id="loadingMsg" style="color:#7a8ba8;font-size:13px;margin-top:8px;">Loading video...</div>
         <div class="speed-bar">
             <span>Speed:</span>
             <button class="speed-btn" data-speed="0.5">0.5x</button>
@@ -1515,8 +1534,23 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
     </div>
 </div>
 <script>
+const videoB64 = "{video_b64}";
+const loadMsg = document.getElementById("loadingMsg");
 const vid = document.getElementById("vid");
 vid.playsInline = true;
+vid.setAttribute("playsinline", "");
+vid.setAttribute("webkit-playsinline", "");
+try {{
+    const byteChars = atob(videoB64);
+    const len = byteChars.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([bytes], {{ type: "video/mp4" }});
+    vid.src = URL.createObjectURL(blob);
+    if (loadMsg) loadMsg.style.display = "none";
+}} catch(e) {{
+    if (loadMsg) loadMsg.textContent = "Error loading video: " + e.message;
+}}
 const segs = document.querySelectorAll(".seg");
 const panel = document.getElementById("scriptPanel");
 const notesBar = document.getElementById("notesBar");
@@ -1583,12 +1617,109 @@ vid.addEventListener("timeupdate", () => {{
 </body>
 </html>'''
 
-    with open(viewer_html_path, "w", encoding="utf-8") as f:
+    with open(viewer_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    html_kb = os.path.getsize(viewer_html_path) / 1024
-    mp4_mb = os.path.getsize(mobile_mp4) / (1024 * 1024)
-    print(f"      Mobile viewer folder: {mobile_dir}/")
-    print(f"        HTML: {os.path.basename(viewer_html_path)} ({html_kb:.0f} KB)")
-    print(f"        Video: {mp4_filename} ({mp4_mb:.1f} MB)")
-    return viewer_html_path
+    # Clean up the temporary re-encoded MP4 (it's embedded in the HTML now)
+    if mobile_mp4 != video_path and os.path.exists(mobile_mp4):
+        os.remove(mobile_mp4)
+
+    size_mb = os.path.getsize(viewer_path) / (1024 * 1024)
+    print(f"      Mobile viewer saved to {viewer_path} ({size_mb:.1f} MB)")
+    return viewer_path
+
+
+def generate_notes_page(video_path: str, timeline: list) -> str:
+    """
+    Generate a lightweight notes-only HTML page (no video).
+    Shows the speaker script and slide notes in a scrollable page
+    that works on any device. Useful as a companion to watching the
+    MP4 natively in Dropbox, iCloud, etc.
+
+    Returns the path to the generated HTML file.
+    """
+    import html as html_mod
+
+    if not timeline:
+        return ""
+
+    notes_path = os.path.splitext(video_path)[0] + "_notes.html"
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+
+    total_duration = timeline[-1]["end"] if timeline else 0
+    total_min = int(total_duration // 60)
+    total_sec = int(total_duration % 60)
+
+    seg_blocks = ""
+    for i, t in enumerate(timeline):
+        escaped_text = html_mod.escape(t["text"]).replace("\n", "<br>")
+        start_min = int(t["start"] // 60)
+        start_sec = int(t["start"] % 60)
+        end_min = int(t["end"] // 60)
+        end_sec = int(t["end"] % 60)
+        duration = t["end"] - t["start"]
+
+        notes_html = ""
+        notes_text = t.get("notes", "")
+        if notes_text:
+            escaped_notes = html_mod.escape(notes_text).replace("\n", "<br>")
+            notes_html = (
+                f'<div class="notes-block">'
+                f'<div class="notes-label">Slide Notes</div>'
+                f'{escaped_notes}</div>'
+            )
+
+        seg_blocks += f'''
+        <div class="slide-section">
+            <div class="slide-header">
+                <span class="slide-num">Slide {t['slide']}</span>
+                <span class="slide-time">{start_min}:{start_sec:02d} — {end_min}:{end_sec:02d} ({duration:.0f}s)</span>
+            </div>
+            <div class="slide-script">{escaped_text}</div>
+            {notes_html}
+        </div>'''
+
+    html_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes — {video_name} ({len(timeline)} slides)</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       background: #f8fafc; color: #1e293b; padding: 16px; }}
+.page-header {{ text-align: center; padding: 20px 0 24px; border-bottom: 2px solid #e2e8f0;
+               margin-bottom: 20px; }}
+.page-title {{ font-size: 18px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }}
+.page-subtitle {{ font-size: 13px; color: #64748b; }}
+.slide-section {{ background: #fff; border-radius: 10px; padding: 16px 18px;
+                 margin-bottom: 12px; border: 1px solid #e2e8f0;
+                 box-shadow: 0 1px 3px rgba(0,0,0,0.04); }}
+.slide-header {{ display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #f1f5f9; }}
+.slide-num {{ font-weight: 700; font-size: 14px; color: #2563eb; }}
+.slide-time {{ font-size: 12px; color: #94a3b8; font-variant-numeric: tabular-nums; }}
+.slide-script {{ font-size: 15px; line-height: 1.7; color: #334155; }}
+.notes-block {{ margin-top: 12px; padding: 12px 14px; background: #fefce8;
+               border: 1px solid #fde68a; border-radius: 8px; }}
+.notes-label {{ font-size: 11px; font-weight: 700; text-transform: uppercase;
+               letter-spacing: 0.5px; color: #a16207; margin-bottom: 6px; }}
+.notes-block {{ font-size: 14px; line-height: 1.6; color: #713f12; }}
+</style>
+</head>
+<body>
+<div class="page-header">
+    <div class="page-title">{html_mod.escape(video_name.replace("_", " ").replace("-", " ").title())}</div>
+    <div class="page-subtitle">{len(timeline)} slides &middot; {total_min}m {total_sec}s total</div>
+</div>
+{seg_blocks}
+</body>
+</html>'''
+
+    with open(notes_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    size_kb = os.path.getsize(notes_path) / 1024
+    print(f"      Notes page saved to {notes_path} ({size_kb:.0f} KB)")
+    return notes_path

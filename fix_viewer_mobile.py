@@ -22,6 +22,7 @@ Options:
 The original file is backed up as <name>_backup.html before patching.
 """
 
+import os
 import re
 import sys
 import shutil
@@ -208,129 +209,161 @@ try {{
     return True
 
 
+def _extract_segments(html: str) -> list:
+    """Extract segment data (slide number, start, end, text, notes) from viewer HTML."""
+    import html as html_mod
+    segments = []
+    # Find each segment div
+    seg_pattern = re.compile(
+        r'<div class="seg" id="seg-(\d+)" data-start="([^"]+)" data-end="([^"]+)">\s*'
+        r'<div class="seg-header">\s*Slide (\d+).*?<div class="seg-text">(.*?)</div>'
+        r'(.*?)</div>\s*(?=<div class="seg"|</div>\s*</div>\s*<script)',
+        re.DOTALL,
+    )
+    for m in seg_pattern.finditer(html):
+        idx, start, end, slide, text, rest = (
+            m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), m.group(6),
+        )
+        notes = ""
+        notes_match = re.search(
+            r'<span class="seg-notes-label">Slide Notes</span>(.*?)</div>',
+            rest, re.DOTALL,
+        )
+        if notes_match:
+            notes = notes_match.group(1).strip()
+        segments.append({
+            "idx": int(idx),
+            "start": float(start),
+            "end": float(end),
+            "slide": int(slide),
+            "text": text.strip(),
+            "notes": notes,
+        })
+    return segments
+
+
 def generate_mobile_version(filepath: str) -> bool:
     """
-    Extract the base64 video from a viewer HTML (patched or unpatched),
-    decode it to a .mp4 file, and generate a mobile-friendly HTML viewer
-    that references the video via a relative path.
+    Create a mobile-friendly self-contained viewer from an existing viewer HTML.
 
-    Creates a *_mobile/ folder next to the viewer HTML containing:
-      - <name>.mp4        (the decoded video)
-      - <name>_viewer.html (tiny HTML that references the MP4)
+    Decodes the embedded base64 video to a temp MP4, re-encodes it at lower
+    bitrate via ffmpeg, then embeds the smaller video as base64 in a new
+    self-contained HTML.  The result is small enough for mobile Safari to load
+    from Dropbox, iCloud, email, etc.
 
-    Returns True if the mobile version was created, False if skipped.
+    Returns True if created, False if skipped.
     """
+    import base64 as b64mod
+    import subprocess
+    import tempfile
+
     path = Path(filepath)
     if not path.exists():
         return False
 
     html = path.read_text(encoding="utf-8")
-
-    # Extract base64 from either format
     video_b64 = _extract_b64_from_data_uri(html) or _extract_b64_from_js(html)
     if not video_b64:
         print(f"  SKIP-MOBILE  {filepath} (no base64 video data found)")
         return False
 
-    # Determine output folder
     stem = path.stem.replace("_viewer", "").replace("_backup", "")
-    mobile_dir = path.parent / f"{stem}_mobile"
-    mobile_dir.mkdir(exist_ok=True)
+    mobile_path = path.parent / f"{stem}_mobile.html"
 
-    # Decode base64 → MP4
-    import base64
-    mp4_filename = f"{stem}.mp4"
-    mp4_path = mobile_dir / mp4_filename
-    if not mp4_path.exists():
-        print(f"  DECODE {mp4_filename} ...")
-        mp4_bytes = base64.b64decode(video_b64)
-        mp4_path.write_bytes(mp4_bytes)
+    # Check if mobile version already exists and is recent enough
+    if mobile_path.exists() and mobile_path.stat().st_mtime >= path.stat().st_mtime:
+        print(f"  SKIP-MOBILE  {filepath} (mobile version already up to date)")
+        return False
 
-    # Extract segment data from the HTML for the script panel
-    import html as html_mod
-    seg_data = []
-    for m in re.finditer(
-        r'<div class="seg" id="seg-(\d+)" data-start="([^"]+)" data-end="([^"]+)">\s*'
-        r'<div class="seg-header">\s*Slide (\d+)',
-        html,
-    ):
-        idx, start, end, slide = m.group(1), m.group(2), m.group(3), m.group(4)
-        seg_data.append({
-            "idx": int(idx),
-            "start": float(start),
-            "end": float(end),
-            "slide": int(slide),
-        })
+    segments = _extract_segments(html)
+    if not segments:
+        print(f"  SKIP-MOBILE  {filepath} (no segment data found in HTML)")
+        return False
 
-    # Extract segment text blocks
-    text_blocks = re.findall(
-        r'<div class="seg-text">(.*?)</div>',
-        html,
-        re.DOTALL,
-    )
+    print(f"  MOBILE  Decoding video from {path.name} ...")
 
-    # Extract notes blocks (may not exist in older viewers)
-    notes_blocks = re.findall(
-        r'<div class="seg-notes">.*?<span class="seg-notes-label">Slide Notes</span>(.*?)</div></div>',
-        html,
-        re.DOTALL,
-    )
+    # Decode base64 → temp MP4
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(b64mod.b64decode(video_b64))
+        orig_mp4 = tmp.name
 
-    # Check for notes bar
-    has_notes_bar = "notesBar" in html
+    # Re-encode at lower bitrate
+    mobile_mp4 = str(mobile_path).replace(".html", ".mp4")
+    print(f"  MOBILE  Re-encoding video at lower bitrate ...")
+    cmd = [
+        "ffmpeg", "-y", "-i", orig_mp4,
+        "-c:v", "libx264", "-crf", "32", "-preset", "fast",
+        "-tune", "stillimage",
+        "-vf", "scale='min(960,iw)':-2",
+        "-c:a", "aac", "-b:a", "96k", "-ac", "1",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        mobile_mp4,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        print(f"  WARNING  ffmpeg re-encode failed, using original video")
+        import shutil as sh
+        sh.copy2(orig_mp4, mobile_mp4)
 
-    # Build notes bar HTML
-    if has_notes_bar:
+    # Base64-encode the mobile video
+    with open(mobile_mp4, "rb") as f:
+        mobile_b64 = b64mod.b64encode(f.read()).decode("ascii")
+
+    # Clean up temp files
+    try:
+        os.remove(orig_mp4)
+        os.remove(mobile_mp4)
+    except OSError:
+        pass
+
+    # Build the mobile HTML using segments extracted from the original
+    has_any_notes = any(s["notes"] for s in segments)
+    notes_bar_html = ""
+    if has_any_notes:
         notes_bar_html = (
             '<div class="notes-bar empty" id="notesBar">'
             '<div class="notes-bar-label">Slide Notes</div>'
             '<div class="notes-bar-text placeholder" id="notesText">'
             'Notes will appear here as the presentation plays</div></div>'
         )
-    else:
-        notes_bar_html = ""
 
-    # Build segment HTML and JS notes data
     seg_blocks = ""
     notes_js_entries = []
-    for i, sd in enumerate(seg_data):
-        text_html = text_blocks[i].strip() if i < len(text_blocks) else ""
-        notes_html_block = ""
-        notes_raw = ""
-        if i < len(notes_blocks):
-            notes_raw = notes_blocks[i].strip()
-            notes_html_block = (
+    for s in segments:
+        notes_html = ""
+        if s["notes"]:
+            notes_html = (
                 f'<div class="seg-notes">'
                 f'<span class="seg-notes-label">Slide Notes</span>'
-                f'{notes_raw}</div>'
+                f'{s["notes"]}</div>'
             )
-        js_notes = notes_raw.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "")
+        js_notes = s["notes"].replace("\\", "\\\\").replace('"', '\\"').replace("\n", "")
         notes_js_entries.append(
-            f'{{start:{sd["start"]},end:{sd["end"]},slide:{sd["slide"]},notes:"{js_notes}"}}'
+            f'{{start:{s["start"]},end:{s["end"]},slide:{s["slide"]},notes:"{js_notes}"}}'
         )
-        start_min = int(sd["start"] // 60)
-        start_sec = int(sd["start"] % 60)
+        sm = int(s["start"] // 60)
+        ss = int(s["start"] % 60)
         seg_blocks += f'''
-        <div class="seg" id="seg-{i}" data-start="{sd['start']}" data-end="{sd['end']}">
+        <div class="seg" id="seg-{s['idx']}" data-start="{s['start']}" data-end="{s['end']}">
             <div class="seg-header">
-                Slide {sd['slide']}
-                <span class="seg-time">{start_min}:{start_sec:02d}</span>
+                Slide {s['slide']}
+                <span class="seg-time">{sm}:{ss:02d}</span>
             </div>
-            <div class="seg-text">{text_html}</div>
-            {notes_html_block}
+            <div class="seg-text">{s['text']}</div>
+            {notes_html}
         </div>'''
     notes_js_array = ",".join(notes_js_entries)
 
-    total_duration = seg_data[-1]["end"] if seg_data else 0
-    total_min = int(total_duration // 60)
-    total_sec = int(total_duration % 60)
+    td = segments[-1]["end"] if segments else 0
+    tm, ts = int(td // 60), int(td % 60)
 
     mobile_html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Presentation Viewer — {len(seg_data)} slides, {total_min}m {total_sec}s</title>
+<title>Presentation Viewer — {len(segments)} slides, {tm}m {ts}s</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -399,9 +432,8 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 <div class="container">
     <div class="video-panel">
         <h2>Presentation</h2>
-        <video id="vid" controls playsinline webkit-playsinline>
-            <source src="{mp4_filename}" type="video/mp4">
-        </video>
+        <video id="vid" controls playsinline webkit-playsinline></video>
+        <div id="loadingMsg" style="color:#7a8ba8;font-size:13px;margin-top:8px;">Loading video...</div>
         <div class="speed-bar">
             <span>Speed:</span>
             <button class="speed-btn" data-speed="0.5">0.5x</button>
@@ -419,8 +451,23 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
     </div>
 </div>
 <script>
+const videoB64 = "{mobile_b64}";
+const loadMsg = document.getElementById("loadingMsg");
 const vid = document.getElementById("vid");
 vid.playsInline = true;
+vid.setAttribute("playsinline", "");
+vid.setAttribute("webkit-playsinline", "");
+try {{
+    const byteChars = atob(videoB64);
+    const len = byteChars.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([bytes], {{ type: "video/mp4" }});
+    vid.src = URL.createObjectURL(blob);
+    if (loadMsg) loadMsg.style.display = "none";
+}} catch(e) {{
+    if (loadMsg) loadMsg.textContent = "Error loading video: " + e.message;
+}}
 const segs = document.querySelectorAll(".seg");
 const panel = document.getElementById("scriptPanel");
 const notesBar = document.getElementById("notesBar");
@@ -429,20 +476,14 @@ const notesData = [{notes_js_array}];
 
 document.querySelectorAll(".speed-btn").forEach(btn => {{
     btn.addEventListener("click", () => {{
-        const speed = parseFloat(btn.dataset.speed);
-        vid.playbackRate = speed;
+        vid.playbackRate = parseFloat(btn.dataset.speed);
         document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
     }});
 }});
-
 segs.forEach(s => {{
-    s.addEventListener("click", () => {{
-        vid.currentTime = parseFloat(s.dataset.start);
-        vid.play();
-    }});
+    s.addEventListener("click", () => {{ vid.currentTime = parseFloat(s.dataset.start); vid.play(); }});
 }});
-
 let lastNotesSlide = -1;
 vid.addEventListener("timeupdate", () => {{
     const t = vid.currentTime;
@@ -450,34 +491,26 @@ vid.addEventListener("timeupdate", () => {{
     segs.forEach(s => {{
         const start = parseFloat(s.dataset.start);
         const end = parseFloat(s.dataset.end);
-        if (t >= start && t < end) {{
-            s.classList.add("active");
-            activeEl = s;
-        }} else {{
-            s.classList.remove("active");
-        }}
+        if (t >= start && t < end) {{ s.classList.add("active"); activeEl = s; }}
+        else {{ s.classList.remove("active"); }}
     }});
     if (activeEl) {{
         const panelRect = panel.getBoundingClientRect();
         const elRect = activeEl.getBoundingClientRect();
         const offset = elRect.top - panelRect.top - panelRect.height / 3;
-        if (Math.abs(offset) > 20) {{
-            panel.scrollBy({{ top: offset, behavior: "smooth" }});
-        }}
+        if (Math.abs(offset) > 20) panel.scrollBy({{ top: offset, behavior: "smooth" }});
     }}
     if (notesBar && notesText) {{
         const nd = notesData.find(n => t >= n.start && t < n.end);
-        const slideNum = nd ? nd.slide : -1;
-        if (slideNum !== lastNotesSlide) {{
-            lastNotesSlide = slideNum;
+        const sn = nd ? nd.slide : -1;
+        if (sn !== lastNotesSlide) {{
+            lastNotesSlide = sn;
             if (nd && nd.notes) {{
-                notesBar.classList.remove("empty");
-                notesText.classList.remove("placeholder");
+                notesBar.classList.remove("empty"); notesText.classList.remove("placeholder");
                 notesText.innerHTML = "<strong>Slide " + nd.slide + ":</strong> " + nd.notes;
             }} else {{
-                notesBar.classList.add("empty");
-                notesText.classList.add("placeholder");
-                notesText.innerHTML = nd ? "No notes for slide " + nd.slide : "Notes will appear here as the presentation plays";
+                notesBar.classList.add("empty"); notesText.classList.add("placeholder");
+                notesText.innerHTML = nd ? "No notes for slide " + nd.slide : "";
             }}
         }}
     }}
@@ -486,21 +519,116 @@ vid.addEventListener("timeupdate", () => {{
 </body>
 </html>'''
 
-    viewer_html_path = mobile_dir / f"{stem}_viewer.html"
-    viewer_html_path.write_text(mobile_html, encoding="utf-8")
+    mobile_path.write_text(mobile_html, encoding="utf-8")
+    size_mb = mobile_path.stat().st_size / (1024 * 1024)
+    print(f"  MOBILE  {mobile_path.name} ({size_mb:.1f} MB)")
+    return True
 
-    html_kb = viewer_html_path.stat().st_size / 1024
-    mp4_mb = mp4_path.stat().st_size / (1024 * 1024)
-    print(f"  MOBILE {mobile_dir}/")
-    print(f"         HTML:  {viewer_html_path.name} ({html_kb:.0f} KB)")
-    print(f"         Video: {mp4_filename} ({mp4_mb:.1f} MB)")
+
+def generate_notes_page(filepath: str) -> bool:
+    """
+    Generate a lightweight notes-only HTML page (no video) from an existing viewer.
+    Shows the speaker script and slide notes in a clean, scrollable page.
+    """
+    import html as html_mod
+
+    path = Path(filepath)
+    if not path.exists():
+        return False
+
+    html_content = path.read_text(encoding="utf-8")
+    segments = _extract_segments(html_content)
+    if not segments:
+        return False
+
+    stem = path.stem.replace("_viewer", "").replace("_backup", "")
+    notes_path = path.parent / f"{stem}_notes.html"
+
+    if notes_path.exists() and notes_path.stat().st_mtime >= path.stat().st_mtime:
+        print(f"  SKIP-NOTES  {filepath} (notes page already up to date)")
+        return False
+
+    td = segments[-1]["end"] if segments else 0
+    tm, ts = int(td // 60), int(td % 60)
+    title = stem.replace("_", " ").replace("-", " ").title()
+
+    seg_blocks = ""
+    for s in segments:
+        sm = int(s["start"] // 60)
+        ss = int(s["start"] % 60)
+        em = int(s["end"] // 60)
+        es = int(s["end"] % 60)
+        dur = s["end"] - s["start"]
+        notes_html = ""
+        if s["notes"]:
+            notes_html = (
+                f'<div class="notes-block">'
+                f'<div class="notes-label">Slide Notes</div>'
+                f'{s["notes"]}</div>'
+            )
+        seg_blocks += f'''
+        <div class="slide-section">
+            <div class="slide-header">
+                <span class="slide-num">Slide {s['slide']}</span>
+                <span class="slide-time">{sm}:{ss:02d} — {em}:{es:02d} ({dur:.0f}s)</span>
+            </div>
+            <div class="slide-script">{s['text']}</div>
+            {notes_html}
+        </div>'''
+
+    page = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes — {html_mod.escape(title)} ({len(segments)} slides)</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       background: #f8fafc; color: #1e293b; padding: 16px; }}
+.page-header {{ text-align: center; padding: 20px 0 24px; border-bottom: 2px solid #e2e8f0;
+               margin-bottom: 20px; }}
+.page-title {{ font-size: 18px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }}
+.page-subtitle {{ font-size: 13px; color: #64748b; }}
+.slide-section {{ background: #fff; border-radius: 10px; padding: 16px 18px;
+                 margin-bottom: 12px; border: 1px solid #e2e8f0;
+                 box-shadow: 0 1px 3px rgba(0,0,0,0.04); }}
+.slide-header {{ display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #f1f5f9; }}
+.slide-num {{ font-weight: 700; font-size: 14px; color: #2563eb; }}
+.slide-time {{ font-size: 12px; color: #94a3b8; font-variant-numeric: tabular-nums; }}
+.slide-script {{ font-size: 15px; line-height: 1.7; color: #334155; }}
+.notes-block {{ margin-top: 12px; padding: 12px 14px; background: #fefce8;
+               border: 1px solid #fde68a; border-radius: 8px;
+               font-size: 14px; line-height: 1.6; color: #713f12; }}
+.notes-label {{ font-size: 11px; font-weight: 700; text-transform: uppercase;
+               letter-spacing: 0.5px; color: #a16207; margin-bottom: 6px; }}
+</style>
+</head>
+<body>
+<div class="page-header">
+    <div class="page-title">{html_mod.escape(title)}</div>
+    <div class="page-subtitle">{len(segments)} slides &middot; {tm}m {ts}s total</div>
+</div>
+{seg_blocks}
+</body>
+</html>'''
+
+    notes_path.write_text(page, encoding="utf-8")
+    size_kb = notes_path.stat().st_size / 1024
+    print(f"  NOTES   {notes_path.name} ({size_kb:.0f} KB)")
     return True
 
 
 def main():
-    if len(sys.argv) < 2 or (len(sys.argv) == 2 and sys.argv[1] == "--force"):
+    if len(sys.argv) < 2 or (len(sys.argv) == 2 and sys.argv[1] in ("--force", "--help")):
         print("Usage: python fix_viewer_mobile.py [--force] <viewer.html> [viewer2.html ...]")
         print("       python fix_viewer_mobile.py [--force] outputs/*_viewer.html")
+        print()
+        print("For each viewer HTML, this script:")
+        print("  1. Patches it for desktop mobile compatibility (Blob URL, responsive CSS)")
+        print("  2. Creates a *_mobile.html with re-encoded smaller video for phones")
+        print("  3. Creates a *_notes.html with script + notes only (no video)")
         print()
         print("Options:")
         print("  --force   Re-patch files that were already patched")
@@ -509,20 +637,20 @@ def main():
     force = "--force" in sys.argv
     files = [f for f in sys.argv[1:] if f != "--force"]
 
-    fixed = 0
+    patched = 0
     mobile = 0
+    notes = 0
     for f in files:
         if fix_viewer_html(f, force=force):
-            fixed += 1
+            patched += 1
         if generate_mobile_version(f):
             mobile += 1
+        if generate_notes_page(f):
+            notes += 1
 
-    print(f"\nDone: {fixed} file(s) patched, {mobile} mobile version(s) created, "
-          f"{len(files) - fixed} skipped.")
-    if fixed:
+    print(f"\nDone: {patched} patched, {mobile} mobile viewer(s), {notes} notes page(s).")
+    if patched:
         print("Originals backed up as *_backup.html (first run only)")
-    if mobile:
-        print("Mobile folders contain HTML + MP4 — upload both files to Dropbox/iCloud/etc.")
 
 
 if __name__ == "__main__":

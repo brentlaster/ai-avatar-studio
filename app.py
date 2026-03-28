@@ -1180,12 +1180,15 @@ with gr.Blocks(
 </div>
 """)
                     pres_viewer_link = gr.File(
-                        label="Presentation Viewer — Desktop (self-contained HTML)",
+                        label="Viewer — Desktop (self-contained HTML)",
                         visible=False,
                     )
                     pres_mobile_viewer = gr.File(
-                        label="Presentation Viewer — Mobile (HTML + MP4, keep in same folder)",
-                        file_count="multiple",
+                        label="Viewer — Mobile (smaller re-encoded video)",
+                        visible=False,
+                    )
+                    pres_notes_page = gr.File(
+                        label="Notes Page (script + slide notes, no video)",
                         visible=False,
                     )
                     pres_script_viewer = gr.HTML(value="", label="Script Viewer")
@@ -1356,21 +1359,23 @@ with gr.Blocks(
                     else:
                         viewer_file = gr.update(value=None, visible=False)
 
-                    # Return the mobile viewer folder (HTML + MP4) as a file list
-                    mobile_dir = os.path.splitext(output_path)[0] + "_mobile"
-                    mobile_files = None
-                    if os.path.isdir(mobile_dir):
-                        mfiles = [
-                            os.path.join(mobile_dir, f)
-                            for f in sorted(os.listdir(mobile_dir))
-                            if f.endswith((".html", ".mp4"))
-                        ]
-                        if mfiles:
-                            mobile_files = gr.update(value=mfiles, visible=True)
-                    if mobile_files is None:
-                        mobile_files = gr.update(value=None, visible=False)
+                    # Return the mobile viewer (re-encoded self-contained HTML)
+                    mobile_path = os.path.splitext(output_path)[0] + "_mobile.html"
+                    mobile_file = None
+                    if os.path.exists(mobile_path):
+                        mobile_file = gr.update(value=mobile_path, visible=True)
+                    else:
+                        mobile_file = gr.update(value=None, visible=False)
 
-                    return output_path, viewer_file, mobile_files, viewer_html
+                    # Return the notes-only page
+                    notes_path = os.path.splitext(output_path)[0] + "_notes.html"
+                    notes_file = None
+                    if os.path.exists(notes_path):
+                        notes_file = gr.update(value=notes_path, visible=True)
+                    else:
+                        notes_file = gr.update(value=None, visible=False)
+
+                    return output_path, viewer_file, mobile_file, notes_file, viewer_html
 
                 except ValueError as e:
                     raise gr.Error(str(e))
@@ -1402,7 +1407,7 @@ with gr.Blocks(
                     pres_output_name,
                     pres_overwrite,
                 ],
-                outputs=[pres_output_video, pres_viewer_link, pres_mobile_viewer, pres_script_viewer],
+                outputs=[pres_output_video, pres_viewer_link, pres_mobile_viewer, pres_notes_page, pres_script_viewer],
             )
 
         # ==============================================================
