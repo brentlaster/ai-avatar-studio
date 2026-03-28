@@ -921,6 +921,14 @@ def generate_presentation(
     except Exception as e:
         print(f"      Warning: Could not generate standalone viewer: {e}")
 
+    # Generate mobile-friendly viewer (small HTML + separate MP4)
+    try:
+        mobile_path = generate_mobile_viewer(output_path, timeline)
+        if mobile_path:
+            print(f"      Mobile viewer:     {mobile_path}")
+    except Exception as e:
+        print(f"      Warning: Could not generate mobile viewer: {e}")
+
     print(f"      Presentation saved to {output_path}")
     print("=" * 60)
     print("  Done!")
@@ -1332,3 +1340,255 @@ vid.addEventListener("timeupdate", () => {{
     size_mb = os.path.getsize(viewer_path) / (1024 * 1024)
     print(f"      Standalone viewer saved to {viewer_path} ({size_mb:.1f} MB)")
     return viewer_path
+
+
+def generate_mobile_viewer(video_path: str, timeline: list) -> str:
+    """
+    Generate a mobile-friendly HTML viewer that references the video as a
+    separate file instead of embedding it as base64.  This keeps the HTML
+    tiny (<50 KB) so mobile Safari can load it, and the video streams
+    normally with playsinline support.
+
+    Both the HTML and a copy of the MP4 are placed in a *_mobile/ folder
+    next to the original video so they can be uploaded together (e.g. to
+    Dropbox, Google Drive, iCloud, etc.).
+
+    Returns the path to the generated HTML file.
+    """
+    import html as html_mod
+
+    if not timeline or not os.path.exists(video_path):
+        return ""
+
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    mobile_dir = os.path.splitext(video_path)[0] + "_mobile"
+    os.makedirs(mobile_dir, exist_ok=True)
+
+    # Copy the MP4 into the mobile folder
+    mp4_filename = os.path.basename(video_path)
+    mobile_mp4 = os.path.join(mobile_dir, mp4_filename)
+    if not os.path.exists(mobile_mp4) or (
+        os.path.getsize(mobile_mp4) != os.path.getsize(video_path)
+    ):
+        shutil.copy2(video_path, mobile_mp4)
+
+    viewer_html_path = os.path.join(mobile_dir, f"{video_name}_viewer.html")
+
+    total_duration = timeline[-1]["end"] if timeline else 0
+    total_min = int(total_duration // 60)
+    total_sec = int(total_duration % 60)
+
+    # Check if any slides have notes
+    has_any_notes = any(t.get("notes", "") for t in timeline)
+
+    # Build notes bar HTML
+    if has_any_notes:
+        notes_bar_html = (
+            '<div class="notes-bar empty" id="notesBar">'
+            '<div class="notes-bar-label">Slide Notes</div>'
+            '<div class="notes-bar-text placeholder" id="notesText">'
+            'Notes will appear here as the presentation plays</div></div>'
+        )
+    else:
+        notes_bar_html = ""
+
+    # Build segment HTML blocks and notes JS data
+    seg_blocks = ""
+    notes_js_entries = []
+    for i, t in enumerate(timeline):
+        escaped_text = html_mod.escape(t["text"]).replace("\n", "<br>")
+        start_min = int(t["start"] // 60)
+        start_sec = int(t["start"] % 60)
+        notes_html = ""
+        notes_text = t.get("notes", "")
+        if notes_text:
+            escaped_notes = html_mod.escape(notes_text).replace("\n", "<br>")
+            notes_html = (
+                f'<div class="seg-notes">'
+                f'<span class="seg-notes-label">Slide Notes</span>'
+                f'{escaped_notes}</div>'
+            )
+        js_notes = html_mod.escape(notes_text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "<br>")
+        notes_js_entries.append(f'{{start:{t["start"]},end:{t["end"]},slide:{t["slide"]},notes:"{js_notes}"}}')
+        seg_blocks += f'''
+        <div class="seg" id="seg-{i}" data-start="{t['start']}" data-end="{t['end']}">
+            <div class="seg-header">
+                Slide {t['slide']}
+                <span class="seg-time">{start_min}:{start_sec:02d}</span>
+            </div>
+            <div class="seg-text">{escaped_text}</div>
+            {notes_html}
+        </div>'''
+    notes_js_array = ",".join(notes_js_entries)
+
+    html_content = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Presentation Viewer — {len(timeline)} slides, {total_min}m {total_sec}s</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       background: #1a1a2e; color: #e0e0e0; }}
+.container {{ display: flex; height: 100vh; }}
+.video-panel {{ flex: 1; display: flex; flex-direction: column; align-items: center;
+               justify-content: center; padding: 20px; background: #16213e; }}
+.video-panel video {{ max-width: 100%; max-height: 70vh; border-radius: 8px;
+                      box-shadow: 0 4px 20px rgba(0,0,0,0.5); }}
+.video-panel h2 {{ color: #a0c4ff; margin-bottom: 12px; font-size: 14px;
+                   letter-spacing: 1px; text-transform: uppercase; }}
+.speed-bar {{ display: flex; gap: 6px; margin-top: 14px; align-items: center; }}
+.speed-bar span {{ font-size: 12px; color: #7a8ba8; margin-right: 4px; }}
+.speed-btn {{ background: rgba(255,255,255,0.08); border: 1px solid #334155;
+              color: #94a3b8; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+              font-size: 13px; transition: all 0.15s; }}
+.speed-btn:hover {{ background: rgba(255,255,255,0.15); color: #e0e0e0; }}
+.speed-btn.active {{ background: #539cff; color: #fff; border-color: #539cff; }}
+.script-panel {{ width: 420px; min-width: 350px; overflow-y: auto; padding: 20px;
+                background: #0f3460; border-left: 2px solid #1a1a2e; }}
+.script-panel h2 {{ color: #a0c4ff; margin-bottom: 16px; font-size: 14px;
+                    letter-spacing: 1px; text-transform: uppercase;
+                    position: sticky; top: 0; background: #0f3460; padding: 8px 0; z-index: 1; }}
+.seg {{ padding: 14px 16px; margin-bottom: 10px; border-radius: 8px;
+        border-left: 3px solid transparent; transition: all 0.3s ease;
+        cursor: pointer; background: rgba(255,255,255,0.03); }}
+.seg:hover {{ background: rgba(255,255,255,0.08); }}
+.seg.active {{ background: rgba(83,156,255,0.15); border-left-color: #539cff; }}
+.seg-header {{ font-weight: 600; color: #539cff; margin-bottom: 6px;
+              display: flex; justify-content: space-between; align-items: center; font-size: 13px; }}
+.seg-time {{ font-weight: 400; color: #7a8ba8; font-size: 12px; }}
+.seg-text {{ font-size: 14px; line-height: 1.6; color: #c8d6e5; }}
+.seg.active .seg-text {{ color: #f0f0f0; }}
+.seg-notes {{ margin-top: 10px; padding: 10px 12px; background: rgba(251,191,36,0.12);
+              border: 1px solid rgba(251,191,36,0.3); border-radius: 6px;
+              font-size: 13px; line-height: 1.55; color: #fde68a; }}
+.seg-notes-label {{ display: block; font-size: 11px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.5px;
+                    color: #fbbf24; margin-bottom: 4px; }}
+.notes-bar {{ width: 100%; margin-top: 14px; padding: 12px 16px;
+             background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.25);
+             border-radius: 8px; min-height: 48px; max-height: 120px; overflow-y: auto;
+             transition: opacity 0.3s ease; }}
+.notes-bar.empty {{ opacity: 0.4; }}
+.notes-bar-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase;
+                    letter-spacing: 0.5px; color: #fbbf24; margin-bottom: 4px; }}
+.notes-bar-text {{ font-size: 13px; line-height: 1.5; color: #fde68a; }}
+.notes-bar-text.placeholder {{ color: #7a8ba8; font-style: italic; }}
+.script-panel::-webkit-scrollbar {{ width: 6px; }}
+.script-panel::-webkit-scrollbar-track {{ background: transparent; }}
+.script-panel::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
+@media (max-width: 768px) {{
+    body {{ height: auto; overflow-y: auto; }}
+    .container {{ flex-direction: column; height: auto; overflow-y: visible; }}
+    .video-panel {{ padding: 12px; flex: none; }}
+    .video-panel video {{ max-height: 35vh; width: 100%; }}
+    .script-panel {{ width: 100%; min-width: unset; max-height: none;
+                     overflow-y: visible;
+                     border-left: none; border-top: 2px solid #1a1a2e; }}
+    .speed-bar {{ flex-wrap: wrap; }}
+    .notes-bar {{ max-height: 100px; }}
+}}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="video-panel">
+        <h2>Presentation</h2>
+        <video id="vid" controls playsinline webkit-playsinline>
+            <source src="{mp4_filename}" type="video/mp4">
+        </video>
+        <div class="speed-bar">
+            <span>Speed:</span>
+            <button class="speed-btn" data-speed="0.5">0.5x</button>
+            <button class="speed-btn" data-speed="0.75">0.75x</button>
+            <button class="speed-btn active" data-speed="1">1x</button>
+            <button class="speed-btn" data-speed="1.25">1.25x</button>
+            <button class="speed-btn" data-speed="1.5">1.5x</button>
+            <button class="speed-btn" data-speed="2">2x</button>
+        </div>
+        {notes_bar_html}
+    </div>
+    <div class="script-panel" id="scriptPanel">
+        <h2>Speaker Script</h2>
+{seg_blocks}
+    </div>
+</div>
+<script>
+const vid = document.getElementById("vid");
+vid.playsInline = true;
+const segs = document.querySelectorAll(".seg");
+const panel = document.getElementById("scriptPanel");
+const notesBar = document.getElementById("notesBar");
+const notesText = document.getElementById("notesText");
+const notesData = [{notes_js_array}];
+
+// Speed control
+document.querySelectorAll(".speed-btn").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+        const speed = parseFloat(btn.dataset.speed);
+        vid.playbackRate = speed;
+        document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+    }});
+}});
+
+segs.forEach(s => {{
+    s.addEventListener("click", () => {{
+        vid.currentTime = parseFloat(s.dataset.start);
+        vid.play();
+    }});
+}});
+
+let lastNotesSlide = -1;
+vid.addEventListener("timeupdate", () => {{
+    const t = vid.currentTime;
+    let activeEl = null;
+    segs.forEach(s => {{
+        const start = parseFloat(s.dataset.start);
+        const end = parseFloat(s.dataset.end);
+        if (t >= start && t < end) {{
+            s.classList.add("active");
+            activeEl = s;
+        }} else {{
+            s.classList.remove("active");
+        }}
+    }});
+    if (activeEl) {{
+        const panelRect = panel.getBoundingClientRect();
+        const elRect = activeEl.getBoundingClientRect();
+        const offset = elRect.top - panelRect.top - panelRect.height / 3;
+        if (Math.abs(offset) > 20) {{
+            panel.scrollBy({{ top: offset, behavior: "smooth" }});
+        }}
+    }}
+    if (notesBar && notesText) {{
+        const nd = notesData.find(n => t >= n.start && t < n.end);
+        const slideNum = nd ? nd.slide : -1;
+        if (slideNum !== lastNotesSlide) {{
+            lastNotesSlide = slideNum;
+            if (nd && nd.notes) {{
+                notesBar.classList.remove("empty");
+                notesText.classList.remove("placeholder");
+                notesText.innerHTML = "<strong>Slide " + nd.slide + ":</strong> " + nd.notes;
+            }} else {{
+                notesBar.classList.add("empty");
+                notesText.classList.add("placeholder");
+                notesText.innerHTML = nd ? "No notes for slide " + nd.slide : "Notes will appear here as the presentation plays";
+            }}
+        }}
+    }}
+}});
+</script>
+</body>
+</html>'''
+
+    with open(viewer_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    html_kb = os.path.getsize(viewer_html_path) / 1024
+    mp4_mb = os.path.getsize(mobile_mp4) / (1024 * 1024)
+    print(f"      Mobile viewer folder: {mobile_dir}/")
+    print(f"        HTML: {os.path.basename(viewer_html_path)} ({html_kb:.0f} KB)")
+    print(f"        Video: {mp4_filename} ({mp4_mb:.1f} MB)")
+    return viewer_html_path
