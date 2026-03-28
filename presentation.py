@@ -1237,6 +1237,15 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 // (mobile Safari does not support data: URIs on <video> elements)
 const videoB64 = "{video_b64}";
 const loadMsg = document.getElementById("loadingMsg");
+const vid = document.getElementById("vid");
+
+// Force inline playback on iOS — the JS property (camelCase) is what
+// iOS actually checks; the HTML attribute alone is not always enough,
+// especially in WebViews (Mail, Files, Messages).
+vid.playsInline = true;
+vid.setAttribute("playsinline", "");
+vid.setAttribute("webkit-playsinline", "");
+
 try {{
     const byteChars = atob(videoB64);
     const len = byteChars.length;
@@ -1244,14 +1253,12 @@ try {{
     for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
     const blob = new Blob([bytes], {{ type: "video/mp4" }});
     const blobUrl = URL.createObjectURL(blob);
-    document.getElementById("vid").src = blobUrl;
+    vid.src = blobUrl;
     if (loadMsg) loadMsg.style.display = "none";
 }} catch(e) {{
     if (loadMsg) loadMsg.textContent = "Error loading video: " + e.message;
     console.error("Video blob creation failed:", e);
 }}
-
-const vid = document.getElementById("vid");
 const segs = document.querySelectorAll(".seg");
 const panel = document.getElementById("scriptPanel");
 const notesBar = document.getElementById("notesBar");

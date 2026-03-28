@@ -151,6 +151,15 @@ def fix_viewer_html(filepath: str, force: bool = False) -> bool:
 // (mobile Safari does not support data: URIs on <video> elements)
 const videoB64 = "{video_b64}";
 const loadMsg = document.getElementById("loadingMsg");
+const vid = document.getElementById("vid");
+
+// Force inline playback on iOS — the JS property (camelCase) is what
+// iOS actually checks; the HTML attribute alone is not always enough,
+// especially in WebViews (Mail, Files, Messages).
+vid.playsInline = true;
+vid.setAttribute("playsinline", "");
+vid.setAttribute("webkit-playsinline", "");
+
 try {{
     const byteChars = atob(videoB64);
     const len = byteChars.length;
@@ -158,7 +167,7 @@ try {{
     for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
     const blob = new Blob([bytes], {{ type: "video/mp4" }});
     const blobUrl = URL.createObjectURL(blob);
-    document.getElementById("vid").src = blobUrl;
+    vid.src = blobUrl;
     if (loadMsg) loadMsg.style.display = "none";
 }} catch(e) {{
     if (loadMsg) loadMsg.textContent = "Error loading video: " + e.message;
@@ -169,6 +178,24 @@ try {{
     # Only add if not already present (clean-slate step above should have removed it)
     if "const videoB64" not in html:
         html = html.replace("<script>\n", "<script>\n" + blob_loader, 1)
+
+    # 6. Remove the original "const vid" line that the unpatched file has
+    #    (the blob loader now declares it earlier to set playsInline before src)
+    #    Use a regex that matches the standalone line but NOT the one inside the blob loader
+    html = re.sub(
+        r'\n(const segs = )',
+        r'\nconst segs = ',
+        html,
+    )
+    # Remove duplicate: if "const vid" appears twice (once in blob loader, once in original)
+    # keep only the first occurrence
+    vid_lines = list(re.finditer(r'^const vid = document\.getElementById\("vid"\);$', html, re.MULTILINE))
+    if len(vid_lines) > 1:
+        # Remove the second (original) occurrence
+        second = vid_lines[1]
+        html = html[:second.start()] + html[second.end():]
+        # Clean up any resulting blank lines
+        html = re.sub(r'\n{3,}', '\n\n', html)
 
     # Write patched file
     path.write_text(html, encoding="utf-8")
