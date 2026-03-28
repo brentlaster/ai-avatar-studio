@@ -1144,6 +1144,7 @@ def generate_standalone_viewer(video_path: str, timeline: list) -> str:
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Presentation Viewer — {len(timeline)} slides, {total_min}m {total_sec}s</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -1196,15 +1197,24 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 .script-panel::-webkit-scrollbar {{ width: 6px; }}
 .script-panel::-webkit-scrollbar-track {{ background: transparent; }}
 .script-panel::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
+@media (max-width: 768px) {{
+    .container {{ flex-direction: column; height: auto; overflow-y: auto; }}
+    .video-panel {{ padding: 12px; }}
+    .video-panel video {{ max-height: 40vh; }}
+    .script-panel {{ width: 100%; min-width: unset; max-height: 50vh;
+                     border-left: none; border-top: 2px solid #1a1a2e; }}
+    .speed-bar {{ flex-wrap: wrap; }}
+    .notes-bar {{ max-height: 100px; }}
+    body {{ overflow-y: auto; }}
+}}
 </style>
 </head>
 <body>
 <div class="container">
     <div class="video-panel">
         <h2>Presentation</h2>
-        <video id="vid" controls>
-            <source src="data:video/mp4;base64,{video_b64}" type="video/mp4">
-        </video>
+        <video id="vid" controls playsinline></video>
+        <div id="loadingMsg" style="color:#7a8ba8;font-size:13px;margin-top:8px;">Loading video...</div>
         <div class="speed-bar">
             <span>Speed:</span>
             <button class="speed-btn" data-speed="0.5">0.5x</button>
@@ -1222,6 +1232,24 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
     </div>
 </div>
 <script>
+// Convert base64 video to Blob URL for mobile compatibility
+// (mobile Safari does not support data: URIs on <video> elements)
+const videoB64 = "{video_b64}";
+const loadMsg = document.getElementById("loadingMsg");
+try {{
+    const byteChars = atob(videoB64);
+    const len = byteChars.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([bytes], {{ type: "video/mp4" }});
+    const blobUrl = URL.createObjectURL(blob);
+    document.getElementById("vid").src = blobUrl;
+    if (loadMsg) loadMsg.style.display = "none";
+}} catch(e) {{
+    if (loadMsg) loadMsg.textContent = "Error loading video: " + e.message;
+    console.error("Video blob creation failed:", e);
+}}
+
 const vid = document.getElementById("vid");
 const segs = document.querySelectorAll(".seg");
 const panel = document.getElementById("scriptPanel");
