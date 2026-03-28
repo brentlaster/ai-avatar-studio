@@ -63,7 +63,7 @@ def fix_viewer_html(filepath: str) -> bool:
     #    Handle both <source .../> and <source ...></source> variants
     html = re.sub(
         r'<video\s+id="vid"\s+controls\s*>.*?</video>',
-        '<video id="vid" controls playsinline></video>\n'
+        '<video id="vid" controls playsinline webkit-playsinline></video>\n'
         '        <div id="loadingMsg" style="color:#7a8ba8;font-size:13px;margin-top:8px;">Loading video...</div>',
         html,
         flags=re.DOTALL,
@@ -72,13 +72,14 @@ def fix_viewer_html(filepath: str) -> bool:
     # 3. Add responsive CSS before </style>
     responsive_css = """
 @media (max-width: 768px) {
-    .container { flex-direction: column; height: auto; overflow-y: auto; }
-    .video-panel { padding: 12px; }
-    .video-panel video { max-height: 40vh; }
-    .script-panel { width: 100%; min-width: unset; max-height: 50vh;
+    body { height: auto; overflow-y: auto; }
+    .container { flex-direction: column; height: auto; overflow-y: visible; }
+    .video-panel { padding: 12px; flex: none; }
+    .video-panel video { max-height: 35vh; width: 100%; }
+    .script-panel { width: 100%; min-width: unset; max-height: none;
+                     overflow-y: visible;
                      border-left: none; border-top: 2px solid #1a1a2e; }
     .speed-bar { flex-wrap: wrap; }
-    body { overflow-y: auto; }
 }
 """
     if "@media" not in html:

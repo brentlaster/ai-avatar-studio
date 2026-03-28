@@ -1198,14 +1198,15 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 .script-panel::-webkit-scrollbar-track {{ background: transparent; }}
 .script-panel::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
 @media (max-width: 768px) {{
-    .container {{ flex-direction: column; height: auto; overflow-y: auto; }}
-    .video-panel {{ padding: 12px; }}
-    .video-panel video {{ max-height: 40vh; }}
-    .script-panel {{ width: 100%; min-width: unset; max-height: 50vh;
+    body {{ height: auto; overflow-y: auto; }}
+    .container {{ flex-direction: column; height: auto; overflow-y: visible; }}
+    .video-panel {{ padding: 12px; flex: none; }}
+    .video-panel video {{ max-height: 35vh; width: 100%; }}
+    .script-panel {{ width: 100%; min-width: unset; max-height: none;
+                     overflow-y: visible;
                      border-left: none; border-top: 2px solid #1a1a2e; }}
     .speed-bar {{ flex-wrap: wrap; }}
     .notes-bar {{ max-height: 100px; }}
-    body {{ overflow-y: auto; }}
 }}
 </style>
 </head>
@@ -1213,7 +1214,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans
 <div class="container">
     <div class="video-panel">
         <h2>Presentation</h2>
-        <video id="vid" controls playsinline></video>
+        <video id="vid" controls playsinline webkit-playsinline></video>
         <div id="loadingMsg" style="color:#7a8ba8;font-size:13px;margin-top:8px;">Loading video...</div>
         <div class="speed-bar">
             <span>Speed:</span>
